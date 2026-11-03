@@ -1,11 +1,11 @@
 import { currentUserFromRequest, json } from "@/lib/store/http";
 import {
   updateOrderStatus,
-  releaseProduct,
+  releaseProductIfHeldBy,
   updateOrderShipping,
-  listOrders,
+  getOrder,
 } from "@/lib/store/services";
-import { ORDER_STATUSES } from "@/lib/store/order-status";
+import { ORDER_STATUSES, canAdvanceFulfillment } from "@/lib/store/order-status";
 
 const ALLOWED = new Set(ORDER_STATUSES.map((s) => s.id));
 
@@ -19,14 +19,16 @@ export default async function handler(req, res) {
 
     // Liberar productos de un pedido cancelado
     if (body.action === "release_products") {
-      const orders = await listOrders();
-      const order = orders.find((o) => o.id === id);
+      const order = await getOrder(id);
       if (!order) return json(res, { error: "Pedido no encontrado" }, 404);
       if (order.status !== "cancelado") {
         return json(res, { error: "Solo se liberan piezas de pedidos cancelados" }, 400);
       }
+      if (order.paymentStatus === "pagado") {
+        return json(res, { error: "El pago sigue aprobado. Reembolsa en Mercado Pago antes de liberar." }, 400);
+      }
       for (const item of order.items || []) {
-        if (item.productId) await releaseProduct(item.productId);
+        if (item.productId) await releaseProductIfHeldBy(item.productId, order.id);
       }
       return json(res, { ok: true, message: "Piezas liberadas al catálogo" });
     }
@@ -51,6 +53,11 @@ export default async function handler(req, res) {
     const note = body.note || "";
     if (!status || !ALLOWED.has(status)) {
       return json(res, { error: "Estatus inválido" }, 400);
+    }
+    const current = await getOrder(id);
+    if (!current) return json(res, { error: "Pedido no encontrado" }, 404);
+    if (status !== current.status && status !== "cancelado" && !canAdvanceFulfillment(current)) {
+      return json(res, { error: "El pedido todavía no tiene un pago aprobado" }, 400);
     }
     try {
       const order = await updateOrderStatus(id, status, note);

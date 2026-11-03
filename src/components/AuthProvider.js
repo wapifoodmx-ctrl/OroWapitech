@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearSession,
   getStoredToken,
@@ -6,6 +6,7 @@ import {
   setSession,
 } from "@/lib/store/auth-client";
 import { api } from "@/lib/store/client";
+import { mergeGuestCart } from "@/lib/store/guest-cart";
 
 const AuthContext = createContext({
   user: null,
@@ -20,6 +21,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
+  const mergedFor = useRef("");
 
   const hydrate = useCallback(() => {
     const t = getStoredToken();
@@ -79,6 +81,25 @@ export function AuthProvider({ children }) {
       window.removeEventListener("storage", onAuth);
     };
   }, [hydrate, refresh]);
+
+  useEffect(() => {
+    if (loading || !token || !user || user.role === "admin") return;
+    if (mergedFor.current === token) return;
+    mergedFor.current = token;
+    mergeGuestCart()
+      .then((result) => {
+        if (result?.dropped) {
+          sessionStorage.setItem(
+            "ol_cart_notice",
+            "Algunas piezas del carrito ya no estaban disponibles",
+          );
+        }
+        window.dispatchEvent(new Event("ol-cart-change"));
+      })
+      .catch(() => {
+        mergedFor.current = "";
+      });
+  }, [loading, token, user]);
 
   const value = useMemo(
     () => ({ user, token, loading, refresh, logout, setAuth }),

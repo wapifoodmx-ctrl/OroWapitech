@@ -1,16 +1,17 @@
 import Head from "next/head";
 import Link from "next/link";
-import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import { PageShell, useAuth } from "@/components/SiteChrome";
 import { Loader, ButtonSpinner } from "@/components/Loader";
 import { Toast } from "@/components/Toast";
 import { clearGuestCart, getGuestCart, setGuestCart } from "@/lib/store/auth-client";
+import { mergeGuestCart } from "@/lib/store/guest-cart";
 import {
   MX_STATES,
   onlyDigits,
   onlyLettersSpaces,
   validatePhoneMx,
+  validateShippingMx,
   validateZipMx,
 } from "@/lib/store/mx-validate";
 import { api, formatMxn } from "@/lib/store/client";
@@ -29,31 +30,12 @@ const emptyShip = {
   betweenStreets: "",
 };
 
-const REQUIRED_KEYS = [
-  "fullName",
-  "phone",
-  "street",
-  "extNumber",
-  "neighborhood",
-  "city",
-  "state",
-  "zip",
-  "betweenStreets",
-  "references",
-];
-
 function isShippingComplete(s) {
-  if (!s) return false;
-  for (const k of REQUIRED_KEYS) {
-    if (!String(s[k] || "").trim()) return false;
-  }
-  if (validatePhoneMx(s.phone) || validateZipMx(s.zip)) return false;
-  return true;
+  return !validateShippingMx(s);
 }
 
 export default function Carrito() {
   const { user, token, loading } = useAuth();
-  const router = useRouter();
   const [items, setItems] = useState([]);
   const [products, setProducts] = useState([]);
   const [shipping, setShipping] = useState(emptyShip);
@@ -67,18 +49,30 @@ export default function Carrito() {
     async function load() {
       setLoadingCart(true);
       try {
-        const { products: catalog } = await api.products();
-        setProducts(catalog);
-        if (token && user) {
-          const { cart } = await api.cart();
-          setItems(cart.items || []);
+        const notice = sessionStorage.getItem("ol_cart_notice");
+        if (notice) {
+          sessionStorage.removeItem("ol_cart_notice");
+          setToastType("error");
+          setToast(notice);
+        }
+        if (token && user && user.role !== "admin") {
+          const merged = await mergeGuestCart();
+          if (merged?.dropped) {
+            setToastType("error");
+            setToast("Algunas piezas del carrito ya no estaban disponibles");
+          }
+          const { cart, products: mine } = await api.cart();
+          setProducts(mine || []);
+          setItems((cart.items || []).map((item) => ({ ...item, quantity: 1 })));
           const saved = { ...emptyShip, ...(user.shipping || {}) };
           if (!saved.fullName) saved.fullName = user.name || "";
           if (!saved.phone) saved.phone = user.phone || "";
           setShipping(saved);
           setEditShip(!isShippingComplete(saved));
         } else {
-          setItems(getGuestCart());
+          const { products: catalog } = await api.products();
+          setProducts(catalog);
+          setItems(getGuestCart().map((item) => ({ ...item, quantity: 1 })));
         }
       } catch (e) {
         setToastType("error");
@@ -92,15 +86,14 @@ export default function Carrito() {
 
   const rows = useMemo(
     () =>
-      items
-        .map((i) => {
-          const p = products.find((x) => x.id === i.productId);
-          return p ? { ...i, product: p } : null;
-        })
-        .filter(Boolean),
+      items.map((i) => {
+        const p = products.find((x) => x.id === i.productId) || null;
+        return { ...i, quantity: 1, product: p };
+      }),
     [items, products],
   );
-  const total = rows.reduce((s, r) => s + r.product.price * r.quantity, 0);
+  const payable = rows.filter((r) => r.product && r.product.stock >= 1 && !r.product.sold && r.product.active);
+  const total = payable.reduce((s, r) => s + r.product.price, 0);
   const shipOk = isShippingComplete(shipping);
 
   async function checkout() {
@@ -123,14 +116,17 @@ export default function Carrito() {
       try {
         await api.updateProfile({ shipping });
       } catch (_) {}
-      const { order } = await api.checkout({
+      const data = await api.checkout({
         shippingName: shipping.fullName,
         shippingCity: shipping.city,
         shipping,
       });
       clearGuestCart();
       setItems([]);
-      router.push(`/pedido/exito?id=${order.id}`);
+      const url = data.init_point || data.sandbox_init_point;
+      if (!url) throw new Error("Mercado Pago no devolvió el link de pago");
+      window.location.href = url;
+      return;
     } catch (e) {
       setToastType("error");
       setToast(e.message);
@@ -166,13 +162,15 @@ export default function Carrito() {
                   className="flex gap-4 rounded-[var(--radius-lg)] border border-border bg-surface p-4"
                 >
                   <img
-                    src={r.product.image || (r.product.images && r.product.images[0]) || ""}
+                    src={r.product?.image || (r.product?.images && r.product.images[0]) || ""}
                     alt=""
                     className="size-24 rounded-[var(--radius-md)] object-cover bg-elevated"
                   />
                   <div className="flex-1">
-                    <h2 className="font-display text-xl">{r.product.name}</h2>
-                    <p className="text-sm tabular-nums text-muted">{formatMxn(r.product.price)}</p>
+                    <h2 className="font-display text-xl">{r.product?.name || "Pieza no disponible"}</h2>
+                    <p className="text-sm tabular-nums text-muted">
+                      {r.product ? formatMxn(r.product.price) : "Ya no está disponible"}
+                    </p>
                     <button
                       type="button"
                       className="mt-3 text-xs text-danger"
@@ -202,6 +200,8 @@ export default function Carrito() {
                   >
                     Entrar para comprar
                   </Link>
+                ) : user.role === "admin" ? (
+                  <p className="mt-4 text-sm text-muted">La cuenta de atelier no realiza compras.</p>
                 ) : (
                   <>
                     <h3 className="mt-6 font-display text-xl">Datos de envío</h3>
@@ -320,14 +320,19 @@ export default function Carrito() {
                       </div>
                     )}
 
+                    {payable.length !== rows.length ? (
+                      <p className="mt-4 text-sm text-danger">
+                        Hay una pieza que ya no está disponible. Quítala para continuar.
+                      </p>
+                    ) : null}
                     <button
                       type="button"
-                      disabled={busy || !shipOk}
+                      disabled={busy || !shipOk || payable.length === 0 || payable.length !== rows.length}
                       onClick={checkout}
                       className="mt-5 inline-flex h-12 w-full items-center justify-center gap-2 rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg disabled:opacity-50"
                     >
                       {busy ? <ButtonSpinner /> : null}
-                      Confirmar pedido
+                      Pagar con Mercado Pago
                     </button>
                   </>
                 )}

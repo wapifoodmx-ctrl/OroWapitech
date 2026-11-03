@@ -22,8 +22,8 @@ export default function PedidoExito() {
           <p className="text-xs tracking-[0.28em] uppercase text-gold">Pedido registrado</p>
           <h1 className="mt-3 font-display text-4xl">¡Gracias por tu compra!</h1>
           <p className="mt-4 text-muted">
-            Tu pedido quedó registrado. Pronto integraremos el pago en línea; por ahora el atelier
-            confirmará el estatus desde el panel.
+            Si acabas de pagar, Mercado Pago confirma el cargo y el pedido pasa a confirmado.
+            También puedes revisar el estado en Mi cuenta.
           </p>
           {id ? <p className="mt-4 text-sm text-gold">Folio: {id}</p> : null}
           <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:justify-center">

@@ -13,7 +13,7 @@ import {
   validateZipMx,
 } from "@/lib/store/mx-validate";
 import { setSession } from "@/lib/store/auth-client";
-import { statusLabel, canEditShipping } from "@/lib/store/order-status";
+import { statusLabel, canEditShipping, paymentLabel } from "@/lib/store/order-status";
 import { api, formatMxn } from "@/lib/store/client";
 
 const emptyShipping = {
@@ -236,9 +236,34 @@ export default function Cuenta() {
                       <p className={`mt-1 text-sm ${o.status === "cancelado" ? "text-danger" : "text-gold-strong"}`}>
                         {statusLabel(o.status || "recibido")}
                       </p>
+                      <p className="text-sm text-muted">{paymentLabel(o.paymentStatus)}</p>
+                      {(o.items || []).map((item) => (
+                        <p key={item.productId} className="text-sm text-muted">
+                          {item.name}
+                        </p>
+                      ))}
                       <p className="text-sm text-muted">
                         {o.shippingName || o.shipping?.fullName} · {o.shippingCity || o.shipping?.city}
                       </p>
+                      {o.paymentStatus === "pendiente" && (o.status === "recibido" || o.status === "confirmado") ? (
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex h-10 items-center rounded-full bg-gold px-4 text-xs tracking-[0.16em] uppercase text-bg"
+                          onClick={async () => {
+                            try {
+                              const data = await api.mpCheckout(o.id);
+                              const url = data.init_point || data.sandbox_init_point;
+                              if (!url) throw new Error("Mercado Pago no devolvió el link de pago");
+                              window.location.href = url;
+                            } catch (err) {
+                              setToastType("error");
+                              setToast(err.message);
+                            }
+                          }}
+                        >
+                          Continuar al pago
+                        </button>
+                      ) : null}
 
                       {canEditShipping(o.status || "recibido") ? (
                         editingOrderId === o.id ? (
@@ -246,10 +271,26 @@ export default function Cuenta() {
                             <Field label="Nombre quien recibe" value={orderShip.fullName || ""} onChange={(v) => setOrderShip({ ...orderShip, fullName: v })} maxLength={80} />
                             <Field label="Teléfono" value={orderShip.phone || ""} onChange={(v) => setOrderShip({ ...orderShip, phone: onlyDigits(v, 10) })} maxLength={10} />
                             <Field label="Calle" value={orderShip.street || ""} onChange={(v) => setOrderShip({ ...orderShip, street: v })} maxLength={80} />
+                            <Field label="No. exterior" value={orderShip.extNumber || ""} onChange={(v) => setOrderShip({ ...orderShip, extNumber: v })} maxLength={10} />
+                            <Field label="No. interior" value={orderShip.intNumber || ""} onChange={(v) => setOrderShip({ ...orderShip, intNumber: v })} maxLength={10} />
                             <Field label="Colonia" value={orderShip.neighborhood || ""} onChange={(v) => setOrderShip({ ...orderShip, neighborhood: v })} maxLength={60} />
                             <Field label="Ciudad" value={orderShip.city || ""} onChange={(v) => setOrderShip({ ...orderShip, city: v })} maxLength={60} />
-                            <Field label="Estado" value={orderShip.state || ""} onChange={(v) => setOrderShip({ ...orderShip, state: v })} maxLength={40} />
+                            <label className="block">
+                              <span className="mb-1 block text-xs tracking-[0.16em] uppercase text-subtle">Estado</span>
+                              <select
+                                value={orderShip.state || ""}
+                                onChange={(e) => setOrderShip({ ...orderShip, state: e.target.value })}
+                                className="h-12 w-full rounded-[var(--radius-md)] border border-border bg-bg px-4"
+                              >
+                                <option value="">Selecciona</option>
+                                {MX_STATES.map((s) => (
+                                  <option key={s} value={s}>{s}</option>
+                                ))}
+                              </select>
+                            </label>
                             <Field label="C.P." value={orderShip.zip || ""} onChange={(v) => setOrderShip({ ...orderShip, zip: onlyDigits(v, 5) })} maxLength={5} />
+                            <Field label="Entre calles" value={orderShip.betweenStreets || ""} onChange={(v) => setOrderShip({ ...orderShip, betweenStreets: v })} maxLength={80} />
+                            <Field label="Referencias" value={orderShip.references || ""} onChange={(v) => setOrderShip({ ...orderShip, references: v })} maxLength={120} />
                             <div className="flex gap-2 pt-1">
                               <button
                                 type="button"
@@ -286,11 +327,13 @@ export default function Cuenta() {
                                 phone: o.shipping?.phone || "",
                                 street: o.shipping?.street || "",
                                 extNumber: o.shipping?.extNumber || "",
+                                intNumber: o.shipping?.intNumber || "",
                                 neighborhood: o.shipping?.neighborhood || "",
                                 city: o.shipping?.city || o.shippingCity || "",
                                 state: o.shipping?.state || "",
                                 zip: o.shipping?.zip || "",
                                 references: o.shipping?.references || "",
+                                betweenStreets: o.shipping?.betweenStreets || "",
                               });
                             }}
                           >

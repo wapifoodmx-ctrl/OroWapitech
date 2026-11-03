@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs"
+    "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs",
+    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs"
   },
   "dependencies": {
     "@supabase/server": "^1.8.0",

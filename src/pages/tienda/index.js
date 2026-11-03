@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PageShell } from "@/components/SiteChrome";
 import { api, formatMxn } from "@/lib/store/client";
 
-const cats = [
+const FALLBACK_CATS = [
   { id: "all", label: "Todo" },
   { id: "anillos", label: "Anillos" },
   { id: "collares", label: "Collares" },
@@ -14,11 +14,21 @@ const cats = [
 
 export default function Tienda() {
   const [products, setProducts] = useState([]);
+  const [cats, setCats] = useState(FALLBACK_CATS);
   const [cat, setCat] = useState("all");
   const [err, setErr] = useState("");
 
   useEffect(() => {
     api.products().then((d) => setProducts(d.products)).catch((e) => setErr(e.message));
+    api
+      .publicSettings()
+      .then((d) => {
+        const extra = (d.categories || [])
+          .filter((c) => c && (c.id || c.slug) && c.name)
+          .map((c) => ({ id: c.slug || c.id, label: c.name }));
+        if (extra.length) setCats([{ id: "all", label: "Todo" }, ...extra]);
+      })
+      .catch(() => setCats(FALLBACK_CATS));
   }, []);
 
   const list = useMemo(

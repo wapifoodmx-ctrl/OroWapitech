@@ -1,10 +1,17 @@
 import crypto from "node:crypto";
-import { getAdminClient, publicImageUrl } from "./supabase";
-import { hashPassword, verifyPassword, generateOtp } from "./password";
-import { sendPasswordOtpEmail } from "./mail";
+import { getAdminClient, publicImageUrl } from "./supabase.js";
+import { hashPassword, verifyPassword, generateOtp } from "./password.js";
+import { sendPasswordOtpEmail } from "./mail.js";
+import { assertStatusTransition } from "./order-status.js";
+import { normalizeSpotMap } from "./mx-validate.js";
+import { reservationIsStale } from "./payment-decision.js";
 
 function uid(prefix = "id") {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+}
+
+export function newId(prefix = "id") {
+  return uid(prefix);
 }
 
 export function newUuid() {
@@ -55,6 +62,8 @@ function mapProduct(row) {
     stones: row.stones || "none",
     stonesNote: row.stones_note || "",
     certificate: row.certificate || null,
+    reservedOrderId: row.reserved_order_id || null,
+    reservedAt: row.reserved_at || null,
     createdAt: row.created_at,
   };
 }
@@ -71,6 +80,12 @@ function mapOrder(row) {
     shippingName: row.shipping_name || "",
     shippingCity: row.shipping_city || "",
     shipping: row.shipping || {},
+    paymentStatus: row.payment_status || null,
+    mpPreferenceId: row.mp_preference_id || null,
+    mpPaymentId: row.mp_payment_id || null,
+    mpStatus: row.mp_status || null,
+    mpStatusDetail: row.mp_status_detail || null,
+    paidAt: row.paid_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -197,7 +212,9 @@ export async function updateUser(id, patch) {
 
 export async function listProducts(opts = {}) {
   let q = sb().from("products").select("*").order("created_at", { ascending: false });
-  if (!opts.includeHidden) q = q.eq("active", true).eq("sold", false);
+  if (!opts.includeHidden) {
+    q = q.eq("active", true).eq("sold", false).is("reserved_order_id", null);
+  }
   const { data, error } = await q;
   if (error) throw new Error(error.message);
   return (data || []).map(mapProduct);
@@ -296,6 +313,8 @@ export async function updateProduct(id, patch) {
   if (patch.featured !== undefined) update.featured = Boolean(patch.featured);
   if (patch.active !== undefined) update.active = Boolean(patch.active);
   if (patch.sold !== undefined) update.sold = Boolean(patch.sold);
+  if (patch.reservedOrderId !== undefined) update.reserved_order_id = patch.reservedOrderId;
+  if (patch.reservedAt !== undefined) update.reserved_at = patch.reservedAt;
   if (patch.priceBreakdown !== undefined) update.price_breakdown = patch.priceBreakdown;
   if (patch.certificate) {
     const prev = current.certificate || {};
@@ -364,7 +383,7 @@ export async function listOrders(userId) {
 export async function createOrder(order) {
   const status = order.status || "recibido";
   const row = {
-    id: uid("ord"),
+    id: order.id || uid("ord"),
     user_id: order.userId,
     items: order.items || [],
     total: Number(order.total || 0),
@@ -373,12 +392,18 @@ export async function createOrder(order) {
       {
         status,
         at: new Date().toISOString(),
-        note: "Pedido registrado",
+        note: order.note || "Pedido registrado",
       },
     ],
     shipping_name: order.shippingName || "",
     shipping_city: order.shippingCity || "",
     shipping: order.shipping || {},
+    payment_status: order.paymentStatus || "pendiente",
+    mp_preference_id: order.mpPreferenceId || null,
+    mp_payment_id: order.mpPaymentId || null,
+    mp_status: order.mpStatus || null,
+    mp_status_detail: order.mpStatusDetail || null,
+    paid_at: order.paidAt || null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -387,21 +412,26 @@ export async function createOrder(order) {
   return mapOrder(data);
 }
 
-export async function updateOrderStatus(orderId, status, note = "") {
-  const { data: current, error: readErr } = await sb()
-    .from("orders")
-    .select("*")
-    .eq("id", orderId)
-    .maybeSingle();
-  if (readErr) throw new Error(readErr.message);
+export async function getOrder(id) {
+  const { data, error } = await sb().from("orders").select("*").eq("id", id).maybeSingle();
+  if (error) throw new Error(error.message);
+  return mapOrder(data);
+}
+
+export async function getProductsByIds(ids) {
+  const unique = [...new Set((ids || []).filter(Boolean))];
+  if (!unique.length) return [];
+  const { data, error } = await sb().from("products").select("*").in("id", unique);
+  if (error) throw new Error(error.message);
+  return (data || []).map(mapProduct);
+}
+
+export async function updateOrderStatus(orderId, status, note = "", opts = {}) {
+  const current = await getOrder(orderId);
   if (!current) return null;
-  if (current.status === "cancelado" && status !== "cancelado") {
-    throw new Error("Un pedido cancelado no puede cambiar de estatus");
-  }
-  if (current.status === "finalizado" && status !== "finalizado") {
-    throw new Error("Un pedido finalizado no puede cambiar de estatus");
-  }
-  const history = Array.isArray(current.status_history) ? [...current.status_history] : [];
+  if (current.status === status) return current;
+  assertStatusTransition(current.status, status, opts);
+  const history = Array.isArray(current.statusHistory) ? [...current.statusHistory] : [];
   history.push({
     status,
     note: note || "",
@@ -418,14 +448,47 @@ export async function updateOrderStatus(orderId, status, note = "") {
     .select("*")
     .single();
   if (error) throw new Error(error.message);
-  // Al cancelar, liberar piezas automáticamente
   if (status === "cancelado") {
     for (const item of data.items || []) {
-      if (item.productId) {
-        await releaseProduct(item.productId);
-      }
+      if (item.productId) await releaseProductIfHeldBy(item.productId, orderId);
     }
   }
+  return mapOrder(data);
+}
+
+export async function saveOrderPayment(orderId, patch) {
+  const current = await getOrder(orderId);
+  if (!current) return null;
+  const update = { updated_at: new Date().toISOString() };
+  if (patch.paymentStatus) update.payment_status = patch.paymentStatus;
+  if (patch.mpPreferenceId !== undefined) update.mp_preference_id = patch.mpPreferenceId;
+  if (patch.mpPaymentId !== undefined) update.mp_payment_id = patch.mpPaymentId;
+  if (patch.mpStatus !== undefined) update.mp_status = patch.mpStatus;
+  if (patch.mpStatusDetail !== undefined) update.mp_status_detail = patch.mpStatusDetail;
+  if (patch.paidAt !== undefined) update.paid_at = patch.paidAt;
+
+  const history = Array.isArray(current.statusHistory) ? [...current.statusHistory] : [];
+  if (patch.status && patch.status !== current.status) {
+    assertStatusTransition(current.status, patch.status, { allowReopen: Boolean(patch.allowReopen) });
+    history.push({
+      status: patch.status,
+      note: patch.note || "",
+      at: new Date().toISOString(),
+    });
+    update.status = patch.status;
+    update.status_history = history;
+  } else if (patch.note) {
+    history.push({
+      status: current.status,
+      note: patch.note,
+      at: new Date().toISOString(),
+      paymentStatus: patch.paymentStatus || current.paymentStatus,
+    });
+    update.status_history = history;
+  }
+
+  const { data, error } = await sb().from("orders").update(update).eq("id", orderId).select("*").single();
+  if (error) throw new Error(error.message);
   return mapOrder(data);
 }
 
@@ -513,8 +576,8 @@ export async function resetPasswordWithOtp({ email, otp, newPassword }) {
   if (!email || !otp || !newPassword) {
     throw new Error("Correo, OTP y nueva contraseña son requeridos");
   }
-  if (String(newPassword).length < 4) {
-    throw new Error("La contraseña debe tener al menos 4 caracteres");
+  if (String(newPassword).length < 6) {
+    throw new Error("La contraseña debe tener al menos 6 caracteres");
   }
   const normalized = String(email).trim().toLowerCase();
   const { data: rows, error } = await sb()
@@ -590,11 +653,18 @@ function mapAdminData(row) {
   return {
     id: row.id,
     categories: row.categories || DEFAULT_ADMIN_DATA.categories,
-    goldSpotByKarat: row.gold_spot_by_karat || {},
+    goldSpotByKarat: normalizeSpotMap(row.gold_spot_by_karat || {}),
     marginPercent: Number(row.margin_percent ?? 35),
     ivaPercent: Number(row.iva_percent ?? 16),
     updatedAt: row.updated_at,
   };
+}
+
+function clampPercent(value, fallback, max) {
+  if (value == null || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(0, Math.round(n * 100) / 100));
 }
 
 export async function updateAdminData(patch) {
@@ -602,9 +672,19 @@ export async function updateAdminData(patch) {
   const row = {
     id: "main",
     categories: patch.categories ?? current.categories,
-    gold_spot_by_karat: patch.goldSpotByKarat ?? current.goldSpotByKarat,
-    margin_percent: patch.marginPercent ?? current.marginPercent,
-    iva_percent: patch.ivaPercent ?? current.ivaPercent,
+    gold_spot_by_karat: normalizeSpotMap(
+      patch.goldSpotByKarat !== undefined ? patch.goldSpotByKarat : current.goldSpotByKarat,
+    ),
+    margin_percent: clampPercent(
+      patch.marginPercent !== undefined ? patch.marginPercent : current.marginPercent,
+      current.marginPercent,
+      500,
+    ),
+    iva_percent: clampPercent(
+      patch.ivaPercent !== undefined ? patch.ivaPercent : current.ivaPercent,
+      current.ivaPercent,
+      100,
+    ),
     updated_at: new Date().toISOString(),
   };
   const { data, error } = await sb().from("admin_data").upsert(row, { onConflict: "id" }).select("*").single();
@@ -613,13 +693,107 @@ export async function updateAdminData(patch) {
 }
 
 
-export async function markProductSold(id) {
-  return updateProduct(id, { active: false, stock: 0, sold: true });
+export async function markProductSold(id, orderId) {
+  const patch = { active: false, stock: 0, sold: true };
+  if (orderId) patch.reservedOrderId = orderId;
+  return updateProduct(id, patch);
 }
 
 /** Libera una pieza vendida/reservada para volver al catálogo */
 export async function releaseProduct(id) {
-  return updateProduct(id, { active: true, stock: 1, sold: false });
+  return updateProduct(id, {
+    active: true,
+    stock: 1,
+    sold: false,
+    reservedOrderId: null,
+    reservedAt: null,
+  });
+}
+
+/** No suelta la pieza si otro pedido ya la reservó o la compró. */
+export async function releaseProductIfHeldBy(productId, orderId) {
+  const product = await getProduct(productId);
+  if (!product) return null;
+  if (product.reservedOrderId && product.reservedOrderId !== orderId) return product;
+  return releaseProduct(productId);
+}
+
+const soldPatch = (orderId) => ({
+  sold: true,
+  stock: 0,
+  active: false,
+  reserved_order_id: orderId,
+});
+
+/** Marca la pieza vendida solo si sigue libre o ya es de este pedido. */
+export async function confirmProductSold(productId, orderId) {
+  const held = await sb()
+    .from("products")
+    .update(soldPatch(orderId))
+    .eq("id", productId)
+    .eq("reserved_order_id", orderId)
+    .select("*");
+  if (held.error) throw new Error(held.error.message);
+  if (held.data?.length) return { ok: true, product: mapProduct(held.data[0]) };
+
+  const free = await sb()
+    .from("products")
+    .update(soldPatch(orderId))
+    .eq("id", productId)
+    .eq("sold", false)
+    .is("reserved_order_id", null)
+    .select("*");
+  if (free.error) throw new Error(free.error.message);
+  if (free.data?.length) return { ok: true, product: mapProduct(free.data[0]) };
+  return { ok: false, reason: "no disponible" };
+}
+
+async function tryReserve(productId, orderId) {
+  const now = new Date().toISOString();
+  const { data, error } = await sb()
+    .from("products")
+    .update({
+      stock: 0,
+      active: false,
+      sold: false,
+      reserved_order_id: orderId,
+      reserved_at: now,
+    })
+    .eq("id", productId)
+    .eq("sold", false)
+    .eq("active", true)
+    .is("reserved_order_id", null)
+    .gte("stock", 1)
+    .select("*");
+  if (error) throw new Error(error.message);
+  return data?.length ? mapProduct(data[0]) : null;
+}
+
+/** Reserva atómica. Si la reserva anterior venció sin pago, la libera y reintenta una vez. */
+export async function reserveProductForOrder(productId, orderId) {
+  const first = await tryReserve(productId, orderId);
+  if (first) return first;
+
+  const current = await getProduct(productId);
+  if (!current || current.sold) return null;
+  if (current.reservedOrderId === orderId) return current;
+  if (!current.reservedOrderId) return null;
+
+  const holder = await getOrder(current.reservedOrderId);
+  if (!reservationIsStale(current, holder)) return null;
+
+  await releaseProductIfHeldBy(productId, current.reservedOrderId);
+  if (
+    holder &&
+    holder.paymentStatus !== "pagado" &&
+    holder.status !== "cancelado" &&
+    holder.status !== "finalizado" &&
+    holder.status !== "enviado" &&
+    holder.status !== "en_envio"
+  ) {
+    await updateOrderStatus(holder.id, "cancelado", "Reserva vencida sin pago confirmado");
+  }
+  return tryReserve(productId, orderId);
 }
 
 export async function updateOrderShipping(orderId, shipping, shippingName, shippingCity) {
@@ -630,15 +804,16 @@ export async function updateOrderShipping(orderId, shipping, shippingName, shipp
     .maybeSingle();
   if (readErr) throw new Error(readErr.message);
   if (!current) return null;
-  if (["cancelado", "finalizado", "enviado"].includes(current.status)) {
+  if (!["recibido", "confirmado"].includes(current.status)) {
     throw new Error("Ya no se pueden editar los datos de envío de este pedido");
   }
+  const merged = { ...(current.shipping || {}), ...(shipping || {}) };
   const { data, error } = await sb()
     .from("orders")
     .update({
-      shipping: shipping || current.shipping || {},
-      shipping_name: shippingName || shipping?.fullName || current.shipping_name || "",
-      shipping_city: shippingCity || shipping?.city || current.shipping_city || "",
+      shipping: merged,
+      shipping_name: shippingName || merged.fullName || current.shipping_name || "",
+      shipping_city: shippingCity || merged.city || current.shipping_city || "",
       updated_at: new Date().toISOString(),
     })
     .eq("id", orderId)
