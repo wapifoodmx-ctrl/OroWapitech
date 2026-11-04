@@ -75,6 +75,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(shipping),
     }),
+  mpCheckout: (orderId) =>
+    request("/api/mercadopago/checkout", {
+      method: "POST",
+      body: JSON.stringify({ orderId }),
+    }),
+  syncPayment: (paymentId) =>
+    request("/api/mercadopago/sync", {
+      method: "POST",
+      body: JSON.stringify({ paymentId }),
+    }),
   orders: () => request("/api/orders"),
   adminProducts: () => request("/api/admin/products"),
   adminCreateProduct: (product) =>

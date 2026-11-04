@@ -61,9 +61,20 @@ export function SiteHeader() {
           <Link href="/guias" onClick={() => setOpen(false)}>Guías</Link>
           <Link href="/cuenta" onClick={() => setOpen(false)}>{isLoggedIn ? "Mi cuenta" : "Entrar"}</Link>
           {user?.role === "admin" ? (
-            <>
-              <Link href="/admin" onClick={() => setOpen(false)}>Atelier</Link>
-            </>
+            <Link href="/admin" onClick={() => setOpen(false)}>Atelier</Link>
+          ) : null}
+          {isLoggedIn ? (
+            <button
+              type="button"
+              className="text-left hover:text-gold"
+              onClick={async () => {
+                setOpen(false);
+                await logout();
+                router.push("/");
+              }}
+            >
+              Salir
+            </button>
           ) : null}
         </div>
       ) : null}

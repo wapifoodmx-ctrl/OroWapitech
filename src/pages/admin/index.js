@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { CertificateBadge } from "@/components/CertificateBadge";
 import { PageShell, useAuth } from "@/components/SiteChrome";
 import { Toast } from "@/components/Toast";
-import { ORDER_STATUSES, statusLabel, nextStatuses } from "@/lib/store/order-status";
-import { calculateSalePrice, formatMxnFromCentavos, KARAT_OPTIONS } from "@/lib/store/mx-validate";
+import { ORDER_STATUSES, statusLabel, nextStatuses, paymentLabel, canAdvanceFulfillment } from "@/lib/store/order-status";
+import { calculateSalePrice, formatMxnFromCentavos, KARAT_OPTIONS, normalizeKaratKey } from "@/lib/store/mx-validate";
 import { api, formatMxn } from "@/lib/store/client";
 
 const emptyForm = {
@@ -45,7 +45,7 @@ export default function Admin() {
   ];
 
   const pricePreview = useMemo(() => {
-    const karat = form.purity || "18K";
+    const karat = normalizeKaratKey(form.purity || "18K");
     const spot = Number(settings?.goldSpotByKarat?.[karat] || 0);
     if (!spot || !form.weightGrams) return null;
     return calculateSalePrice({
@@ -82,8 +82,13 @@ export default function Admin() {
   }
 
   function openEdit(p) {
-    if (p.sold) {
-      showToast("Pieza vendida: no se puede editar hasta liberarla (pedido cancelado)", "error");
+    if (p.sold || p.reservedOrderId) {
+      showToast(
+        p.sold
+          ? "Pieza vendida: no se puede editar hasta liberarla (pedido cancelado)"
+          : "Pieza reservada por un pago en curso",
+        "error",
+      );
       return;
     }
     const imgs = [...(p.images || [])];
@@ -241,7 +246,7 @@ export default function Admin() {
                     <div
                       key={p.id}
                       className={`rounded-[var(--radius-xl)] border border-border bg-surface p-4 ${
-                        p.sold ? "opacity-80" : ""
+                        p.sold || p.reservedOrderId ? "opacity-80" : ""
                       }`}
                     >
                       <div className="relative aspect-square overflow-hidden rounded-[var(--radius-lg)] bg-elevated">
@@ -250,9 +255,9 @@ export default function Admin() {
                         ) : (
                           <div className="flex size-full items-center justify-center text-subtle">Sin imagen</div>
                         )}
-                        {p.sold ? (
+                        {p.sold || p.reservedOrderId ? (
                           <span className="absolute left-2 top-2 rounded-full bg-gold px-2 py-1 text-[10px] uppercase tracking-wide text-bg">
-                            Vendido
+                            {p.sold ? "Vendido" : "Reservada"}
                           </span>
                         ) : null}
                       </div>
@@ -267,6 +272,13 @@ export default function Admin() {
                         <CertificateBadge
                           hasCertificate={hasCert}
                           onClick={() => {
+                            if (p.sold || p.reservedOrderId) {
+                              showToast(
+                                p.sold ? "Pieza vendida: el certificado queda en solo lectura" : "Pieza reservada por un pago en curso",
+                                "error",
+                              );
+                              return;
+                            }
                             setCertModal(p);
                             setCertForm({
                               weightGrams: String(p.certificate?.weightGrams ?? p.weightGrams ?? ""),
@@ -281,9 +293,9 @@ export default function Admin() {
                         />
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {p.sold ? (
+                        {p.sold || p.reservedOrderId ? (
                           <span className="inline-flex h-9 items-center rounded-full border border-gold/40 bg-gold/10 px-3 text-xs uppercase tracking-wide text-gold">
-                            Vendido — solo lectura
+                            {p.sold ? "Vendido — solo lectura" : "Reservada — pago en curso"}
                           </span>
                         ) : (
                           <button
@@ -324,6 +336,15 @@ export default function Admin() {
                             {o.shippingName} · {o.shippingCity}
                           </p>
                           <p className="mt-2 text-xs text-gold-strong">{statusLabel(o.status || "recibido")}</p>
+                          <p className="text-xs text-muted">{paymentLabel(o.paymentStatus)}</p>
+                          {o.mpPaymentId ? (
+                            <p className="text-[11px] text-subtle">MP {o.mpPaymentId}</p>
+                          ) : null}
+                          {(o.items || []).map((item) => (
+                            <p key={item.productId} className="text-sm text-muted">
+                              {item.name}
+                            </p>
+                          ))}
                         </div>
                         <div className="flex flex-col items-end gap-2">
                           {o.status === "cancelado" ? (
@@ -362,13 +383,24 @@ export default function Admin() {
                                 }
                               }}
                             >
-                              {nextStatuses(o.status || "recibido").map((s) => (
+                              {(canAdvanceFulfillment(o)
+                                ? nextStatuses(o.status || "recibido")
+                                : [
+                                    ORDER_STATUSES.find((s) => s.id === (o.status || "recibido")),
+                                    ORDER_STATUSES.find((s) => s.id === "cancelado"),
+                                  ].filter(Boolean)
+                              ).map((s) => (
                                 <option key={s.id} value={s.id}>
                                   {s.step ? `${s.step}. ` : ""}{s.label}
                                 </option>
                               ))}
                             </select>
                           )}
+                          {!canAdvanceFulfillment(o) && o.status !== "cancelado" ? (
+                            <p className="max-w-[220px] text-right text-[11px] text-subtle">
+                              El despacho se habilita cuando el pago queda aprobado.
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -603,17 +635,13 @@ function AdminSettingsPanel({ settings, products, onSaved, onError }) {
     setIva(settings.ivaPercent ?? 16);
   }, [settings]);
 
-  const usedKarats = Array.from(
-    new Set(
-      (products || [])
-        .filter((p) => !p.sold)
-        .map((p) => {
-          const k = String(p.purity || p.karat || "").toUpperCase();
-          return k.endsWith("K") ? k : k ? `${k}K` : null;
-        })
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+  const usedKarats = KARAT_OPTIONS;
+  const karatsInCatalog = new Set(
+    (products || []).map((p) => {
+      const k = String(p.purity || p.karat || "").toUpperCase();
+      return k.endsWith("K") ? k : k ? `${k}K` : "";
+    }),
+  );
 
   async function save() {
     setBusy(true);
@@ -666,11 +694,14 @@ function AdminSettingsPanel({ settings, products, onSaved, onError }) {
       </div>
       <div className="rounded-[var(--radius-xl)] border border-border bg-surface p-6">
         <h2 className="font-display text-2xl">Precio spot oro (MXN / g)</h2>
-        <p className="mt-2 text-sm text-muted">Kilatajes de piezas disponibles. Fórmula: spot × peso × (1+margen) × (1+IVA).</p>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {(usedKarats.length ? usedKarats : ["10K", "14K", "18K", "24K"]).map((k) => (
+        <p className="mt-2 text-sm text-muted">
+          Del 1K al 24K, para poder cotizar antes de publicar la pieza. Fórmula: spot × peso × (1+margen) × (1+IVA).
+        </p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {usedKarats.map((k) => (
             <label key={k} className="block text-xs text-subtle">
               Spot {k}
+              {karatsInCatalog.has(k) ? " · en catálogo" : ""}
               <input
                 className="mt-1 h-11 w-full rounded-md border border-border bg-bg px-3 tabular-nums"
                 value={spot[k] ?? ""}

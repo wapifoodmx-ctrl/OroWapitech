@@ -1,13 +1,7 @@
 import { currentUserFromRequest, json } from "@/lib/store/http";
-import {
-  createOrder,
-  getCart,
-  getProduct,
-  listOrders,
-  setCart,
-  markProductSold,
-  updateOrderShipping,
-} from "@/lib/store/services";
+import { sanitizeShipping, validateShippingMx } from "@/lib/store/mx-validate";
+import { placeOrderAndPreference } from "@/lib/store/payments";
+import { listOrders, updateOrderShipping } from "@/lib/store/services";
 
 export default async function handler(req, res) {
   const user = await currentUserFromRequest(req);
@@ -22,69 +16,42 @@ export default async function handler(req, res) {
     if (user.role === "admin") {
       return json(res, { error: "Usa una cuenta de cliente" }, 403);
     }
-    const cart = await getCart(user.id);
-    if (cart.items.length === 0) return json(res, { error: "El carrito está vacío" }, 400);
-    const lines = [];
-    let total = 0;
-    for (const item of cart.items) {
-      const product = await getProduct(item.productId);
-      if (!product) continue;
-      if (product.stock < 1 || product.sold) {
-        return json(res, { error: `Pieza no disponible: ${product.name}` }, 400);
-      }
-      lines.push({
-        productId: product.id,
-        name: product.name,
-        price: product.price,
-        quantity: 1,
-        certificateUuid: product.certificate?.uuid,
-        serial: product.certificate?.serial,
-      });
-      total += product.price;
+    try {
+      const body = req.body || {};
+      const shipping = sanitizeShipping(body.shipping || {});
+      const { order, preference } = await placeOrderAndPreference({ user, shipping, req });
+      return json(res, {
+        order,
+        id: preference.id,
+        init_point: preference.init_point,
+        sandbox_init_point: preference.sandbox_init_point,
+      }, 201);
+    } catch (error) {
+      console.error("checkout", error.detail || error);
+      return json(res, { error: error.message || "No se pudo crear el pedido" }, error.status || 500);
     }
-    if (lines.length === 0) return json(res, { error: "No hay piezas válidas en el carrito" }, 400);
-
-    for (const line of lines) {
-      await markProductSold(line.productId);
-    }
-
-    const body = req.body || {};
-    const shipping = body.shipping || {};
-    const order = await createOrder({
-      userId: user.id,
-      items: lines,
-      total,
-      shippingName: body.shippingName || shipping.fullName || user.name,
-      shippingCity: body.shippingCity || shipping.city || "",
-      shipping,
-    });
-    await setCart(user.id, []);
-    return json(res, { order }, 201);
   }
 
-  // Cliente actualiza envío de un pedido propio (aún editable)
   if (req.method === "PATCH") {
     if (user.role === "admin") {
       return json(res, { error: "Usa el panel de atelier" }, 403);
     }
     const orderId = req.body?.orderId || req.body?.id;
-    const shipping = req.body?.shipping;
-    if (!orderId || !shipping) {
+    const shipping = sanitizeShipping(req.body?.shipping || {});
+    if (!orderId || !req.body?.shipping) {
       return json(res, { error: "orderId y shipping son requeridos" }, 400);
     }
     const orders = await listOrders(user.id);
-    const mine = orders.find((o) => o.id === orderId);
+    const mine = orders.find((order) => order.id === orderId);
     if (!mine) return json(res, { error: "Pedido no encontrado" }, 404);
+    const merged = { ...(mine.shipping || {}), ...shipping };
+    const shipError = validateShippingMx(merged);
+    if (shipError) return json(res, { error: shipError }, 400);
     try {
-      const order = await updateOrderShipping(
-        orderId,
-        shipping,
-        shipping.fullName,
-        shipping.city,
-      );
+      const order = await updateOrderShipping(orderId, merged, merged.fullName, merged.city);
       return json(res, { order });
-    } catch (e) {
-      return json(res, { error: e.message }, 400);
+    } catch (error) {
+      return json(res, { error: error.message }, 400);
     }
   }
 

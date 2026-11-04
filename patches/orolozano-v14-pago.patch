@@ -1,0 +1,3017 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..48460ca
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,27 @@
++# Copia a .env.local. No pongas secretos reales en este archivo.
++# El build de Next no debe fallar si faltan: se leen al cobrar o al consultar Supabase.
++
++# Supabase — servidor
++SUPABASE_URL=
++SUPABASE_SECRET_KEY=
++SUPABASE_PUBLISHABLE_KEY=
++
++# Supabase — navegador (las mismas URLs/llaves públicas)
++NEXT_PUBLIC_SUPABASE_URL=
++NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
++
++# Auth propia
++OL_JWT_SECRET=
++
++# Correo OTP (opcional). Sin RESEND_API_KEY el código se imprime en la consola del servidor.
++RESEND_API_KEY=
++MAIL_FROM=
++
++# Mercado Pago — los mismos nombres que NewWapifood
++MERCADO_PAGO_ACCESS_TOKEN=
++MERCADO_PAGO_PUBLIC_KEY=
++MERCADO_PAGO_WEBHOOK_SECRET=
++MERCADO_PAGO_COUNTRY=MX
++
++# Solo desarrollo: simula la preferencia sin llamar a Mercado Pago. No lo actives en Vercel.
++# MERCADO_PAGO_MOCK=1
+diff --git a/.gitignore b/.gitignore
+index ad6213f..69e2b2d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/ESTRUCTURA_DEL_PROYECTO.md b/ESTRUCTURA_DEL_PROYECTO.md
+index 4ca57cb..fa2faee 100644
+--- a/ESTRUCTURA_DEL_PROYECTO.md
++++ b/ESTRUCTURA_DEL_PROYECTO.md
+@@ -1,46 +1,51 @@
+ # Estructura del proyecto — Oro Lozano
+ 
+-Documento de referencia del sistema (v7/v8).
++Documento de referencia del sistema (v14, pago con Mercado Pago).
+ 
+ ## Stack
+ 
+ - **Next.js** (Pages Router) + **Tailwind CSS**
+ - **Supabase** (Postgres + Storage)
+ - **Auth propia** con JWT + cookie + **bcrypt**
+-- Recuperación de contraseña por **OTP** al correo
++- Recuperación de contraseña por **OTP** (Resend, o consola si no hay llave)
++- **Mercado Pago Checkout Pro** (preferencia + webhook). Mismo estilo de llamada que NewWapifood: `fetch` a `https://api.mercadopago.com`, sin SDK en el navegador.
+ 
+ ## Árbol principal
+ 
+ ```
+ OroLozano/
+-├── scripts/seed-supabase.mjs     # Seed (usuarios/productos hasheados)
++├── scripts/seed-supabase.mjs
++├── scripts/test-pago.mjs          # decisiones de pago, firma y preferencia (mock)
++├── patches/orolozano-v14-pago.patch
+ ├── supabase/
+-│   ├── schema.sql                # Schema base
+-│   └── migration_v7.sql          # admin_data (categorías, spot, margen, IVA)
++│   ├── schema.sql
++│   ├── migration_v7.sql           # admin_data
++│   ├── migration_v9.sql           # products.sold
++│   ├── migration_v10.sql
++│   └── migration_v14_pago.sql     # pago MP + reserva de pieza
+ ├── src/
+ │   ├── components/
+-│   │   ├── AuthProvider.js       # Sesión global (JWT sessionStorage)
+-│   │   ├── CartDrawer.js         # Carrito flotante
+-│   │   ├── CertificateBadge.js   # Escudo certificado
+-│   │   ├── SiteChrome.js         # Header / footer / shell
+-│   │   ├── Toast.js              # Notificaciones
+-│   │   └── WhatsAppButton.js
++│   │   ├── AuthProvider.js        # sesión + fusión del carrito invitado
++│   │   ├── CartDrawer.js
++│   │   ├── PaymentReturn.js
++│   │   └── …
+ │   ├── lib/store/
+-│   │   ├── supabase.js           # Cliente admin (secret key servidor)
+-│   │   ├── services.js           # Acceso a datos Supabase
+-│   │   ├── client.js             # fetch a /api/*
+-│   │   ├── password.js           # bcrypt hash/verify + OTP
+-│   │   ├── mail.js               # Resend o consola (pruebas)
+-│   │   ├── mx-validate.js        # Validaciones México + precio spot
+-│   │   ├── jwt.js / http.js / auth-client.js / order-status.js
++│   │   ├── mercadopago.js         # token, firma, preferencia (patrón WapiFood)
++│   │   ├── payment-decision.js    # aprobado / pendiente / rechazado, sin red
++│   │   ├── payments.js            # reserva, pedido, webhook
++│   │   ├── services.js
++│   │   └── …
+ │   └── pages/
+-│       ├── index.js, tienda/, producto/, carrito/
+-│       ├── cuenta/               # Login, registro, perfil, OTP, cambio pass
+-│       ├── admin/                # Atelier (modal piezas, certificados, pedidos)
+-│       ├── settings/             # Categorías + spot oro + margen/IVA
+-│       ├── certificado/[uuid].js
+-│       ├── guias/
+-│       └── api/                  # auth, products, cart, orders, admin, settings
++│       ├── carrito/               # envío MX + redirect a MP
++│       ├── pago/exito|pendiente|fallo
++│       ├── cuenta/                # pedidos, pago, envío
++│       ├── admin/                 # piezas, despacho, settings
++│       └── api/
++│           ├── orders.js
++│           └── mercadopago/
++│               ├── checkout.js    # reintentar preferencia
++│               ├── webhook.js
++│               └── sync.js        # la página de retorno adelanta el webhook
+ └── ESTRUCTURA_DEL_PROYECTO.md
+ ```
+ 
+@@ -49,38 +54,123 @@ OroLozano/
+ | Tabla | Uso |
+ |--------|-----|
+ | `users` | Cuentas, perfil, shipping JSONB |
+-| `products` | Piezas únicas, certificado, precio |
+-| `carts` | Carrito por usuario |
+-| `orders` | Pedidos eternos + status_history |
+-| `sessions` | Sesiones cookie |
+-| `password_resets` | OTP hasheados (15 min) |
+-| `admin_data` | Categorías, spot por K, margen, IVA |
+-| Storage `products` | Imágenes |
++| `products` | Pieza única, certificado, `sold`, reserva (`reserved_order_id`) |
++| `carts` | Carrito del cliente logueado |
++| `orders` | Pedidos que no se borran, estatus, pago MP |
++| `sessions` | Cookie de sesión |
++| `password_resets` | OTP hasheado (15 min) |
++| `admin_data` | Categorías, spot por kilataje, margen, IVA |
++| Storage `products` | Fotos |
++
++Columnas de pago en `orders`: `payment_status` (`pendiente`, `pagado`, `rechazado`, `cancelado`, `reembolsado`), `mp_preference_id`, `mp_payment_id`, `mp_status`, `mp_status_detail`, `paid_at`.
+ 
+ ## Roles
+ 
+-- **customer** (`juan` / `uwu`): compra, perfil, envío MX, pedidos
+-- **admin** (`hugo` / `1`): Atelier + Settings (sin formulario de envío personal)
++- **customer**: arma carrito, paga, ve pedidos y corrige el envío mientras el pedido está recibido o confirmado.
++- **admin** (`hugo`): Atelier. No compra. Despacha solo si el pago está `pagado` (los pedidos viejos, previos a esta pasarela, se migran como pagados).
++
++## Precio
++
++`spot(K) × peso × (1 + margen%) × (1 + IVA%)`.
++
++Por defecto margen 35 e IVA 16, o sea `spot × peso × 1.35 × 1.16`. El resultado se guarda en centavos. Settings normaliza el kilataje (`18k` y `18K` son la misma llave) y muestra el spot del 1K al 24K para poder cotizar antes de publicar la pieza.
++
++## Flujo de pago
++
++1. El cliente (logueado) confirma el envío en `/carrito`.
++2. `POST /api/orders` valida el envío, reserva cada pieza (`stock = 0`, `active = false`, `reserved_order_id`) y crea el pedido con `payment_status = pendiente`. El pedido no se borra.
++3. Se crea una preferencia de Checkout Pro:
++   - `external_reference` = id del pedido
++   - `back_urls`: `/pago/exito`, `/pago/pendiente`, `/pago/fallo`
++   - `notification_url`: `{origen}/api/mercadopago/webhook`
++   - `auto_return`: `approved`
++   - un solo pago (`installments: 1`)
++   - el precio de cada pieza va en pesos (`centavos / 100`)
++4. El navegador abre `init_point` o, si no viene, `sandbox_init_point` (igual que WapiFood).
++5. Mercado Pago llama al webhook. La firma `x-signature` se verifica con `MERCADO_PAGO_WEBHOOK_SECRET` (manifiesto `id:{data.id};request-id:{x-request-id};ts:{ts};`). Después se consulta `GET /v1/payments/{id}`.
++6. Resultado, idempotente:
++   - **approved** → `payment_status = pagado`, estatus del pedido `confirmado`, pieza `sold = true`, `stock = 0`
++   - **pending / in_process / in_mediation / authorized** → sigue pendiente y la pieza sigue reservada
++   - **rejected** → pago rechazado, pedido `cancelado` (no se borra) y la pieza se libera
++   - **cancelled** → pago cancelado y la pieza se libera
++   - **refunded / charged_back** → `reembolsado`; si todavía no se envió, se cancela y se libera
++7. Un segundo aviso del mismo pago no vuelve a vender ni a liberar. Un rechazo posterior no pisa un pago ya aprobado.
++8. Dos clientes no pueden pagar la misma pieza: la reserva es un `UPDATE` condicional. Si el cliente abandona el checkout sin generar un pago, la reserva vence a las 2 horas. Un pago en efectivo pendiente no vence.
++
++La página de retorno también llama `POST /api/mercadopago/sync` para aplicar el mismo criterio sin esperar al webhook. En localhost Mercado Pago no puede llamar al webhook; con credenciales de prueba, el sync de la página de retorno actualiza el pedido.
++
++### Diferencias respecto a WapiFood
++
++WapiFood cobra planes de restaurante. Esta tienda cobra pedidos.
++
++- WapiFood guarda en `external_reference` un JSON (`restaurantId`, `planId`, `billing`). Aquí es el id del pedido, que es lo que el webhook tiene que encontrar. El resto de la preferencia (ítems, `payer`, `back_urls`, `auto_return`, `notification_url`, `installments: 1`) sigue el mismo cuerpo.
++- WapiFood no lee `MERCADO_PAGO_PUBLIC_KEY`: el checkout es una redirección, no Checkout Bricks. Aquí tampoco se lee. Hay que configurarla igual para tener el set completo de variables.
++- WapiFood responde 200 aunque el webhook falle. Aquí una falla de base o de red responde 500 para que Mercado Pago reintente. La firma inválida sigue en 401.
++- Las URLs de retorno son `/pago/exito`, `/pago/pendiente` y `/pago/fallo`, no `/pagos/exito` y `/pagos?status=pending`.
++
++## Variables de entorno
++
++| Variable | Dónde se obtiene | Dónde se pone |
++|----------|------------------|---------------|
++| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Vercel y `.env.local` |
++| `SUPABASE_SECRET_KEY` | Supabase → API → secret / service_role. Solo servidor | Vercel (Production y Preview), nunca `NEXT_PUBLIC_` |
++| `SUPABASE_PUBLISHABLE_KEY` | Supabase → API → publishable / anon | Vercel |
++| `NEXT_PUBLIC_SUPABASE_URL` | La misma Project URL | Vercel |
++| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | La misma llave publishable | Vercel |
++| `OL_JWT_SECRET` | Una cadena larga generada por ti | Vercel |
++| `RESEND_API_KEY` | resend.com → API Keys. Opcional | Vercel |
++| `MAIL_FROM` | Un remitente verificado en Resend | Vercel |
++| `MERCADO_PAGO_ACCESS_TOKEN` | [Mercado Pago Developers](https://www.mercadopago.com.mx/developers/panel/app) → tu aplicación → **Credenciales de prueba** o **Credenciales de producción** → Access Token. Pruebas: empieza con `TEST-` | Vercel → Settings → Environment Variables |
++| `MERCADO_PAGO_PUBLIC_KEY` | La misma pantalla de credenciales → Public Key. La app no la usa en el navegador; se guarda para tener el par completo, como en WapiFood | Vercel |
++| `MERCADO_PAGO_WEBHOOK_SECRET` | Developers → tu aplicación → **Webhooks** → Configurar notificaciones. Al guardar la URL, MP muestra la **clave secreta** de la firma | Vercel. Sin esta clave el webhook responde 401 |
++| `MERCADO_PAGO_COUNTRY` | No sale del panel. Para México el valor es `MX` (moneda MXN). WapiFood usa el mismo nombre | Vercel. Default `MX` si se omite |
++
++En Vercel: Project → **Settings** → **Environment Variables**. Márcalas para Production y, si vas a probar el preview, también para Preview. Después hay que **volver a desplegar**: las variables no entran en un deployment ya construido.
++
++No hace falta `NEXT_PUBLIC_SITE_URL`. El origen sale de la petición y, en Vercel, de `VERCEL_PROJECT_PRODUCTION_URL` o `VERCEL_URL`.
++
++### Webhook que hay que registrar en Mercado Pago
++
++```
++https://TU-DOMINIO/api/mercadopago/webhook
++```
++
++Ejemplo, si el dominio de producción es `orolozano.vercel.app`:
++
++```
++https://orolozano.vercel.app/api/mercadopago/webhook
++```
++
++En el panel: Developers → tu aplicación → Webhooks → **Modo de prueba** o **Modo productivo**, según el token.
++
++- URL de notificación: la de arriba
++- Eventos: **Pagos** (`payment`)
++- Guarda y copia la clave secreta a `MERCADO_PAGO_WEBHOOK_SECRET`
++
++Mercado Pago tiene que poder hacer POST público a esa URL (HTTPS). `http://localhost:3000/api/mercadopago/webhook` no le sirve a MP; en local la página de retorno consulta el pago con `/api/mercadopago/sync` si hay `payment_id` en la URL.
++
++## Probar con credenciales de prueba
+ 
+-## Flujos clave
++1. Corre `migration_v14_pago.sql` en el SQL Editor.
++2. En `.env.local` pon el Access Token de **prueba** y el secret del webhook de **prueba**. `MERCADO_PAGO_COUNTRY=MX`.
++3. Crea un usuario de prueba en el panel (Cuentas de prueba). El comprador y el vendedor no pueden ser la misma cuenta.
++4. `npm install`, `npm run seed:supabase`, `npm run dev`.
++5. Entra como cliente, agrega una pieza, llena el envío y pulsa **Pagar con Mercado Pago**.
++6. En el checkout de prueba usa las tarjetas de la documentación de MP. El titular **APRO** aprueba; **OTHE** queda pendiente; **FUND** o un rechazo libera la pieza al confirmarse el pago.
++7. Al volver a `/pago/exito` la app consulta el pago. En local eso sustituye al webhook. Con el sitio ya en HTTPS, MP además llama al webhook.
++8. En Mi cuenta el pedido debe decir **Pagado** y **Pedido confirmado**. En Atelier → Despachar ya se puede avanzar el envío. Cancelar un pedido no lo borra: libera la pieza solo si ese pedido la sigue teniendo.
+ 
+-1. **Login** → bcrypt + JWT en sessionStorage + cookie  
+-2. **Registro** → password hasheado en Supabase  
+-3. **Olvidé contraseña** → OTP al correo (o consola sin RESEND_API_KEY)  
+-4. **Cambiar contraseña** (logueado) → actual + nueva, sin OTP  
+-5. **Precio pieza** → `spot(K) × peso × (1+margen%) × (1+IVA%)`  
+-6. **Pedidos** → estatus 1→5, no se borran  
+-7. **Piezas** → editar / ocultar (soft delete) / certificado  
++`npm run test:pago` cubre la firma, la preferencia (mock) y los cambios de estado sin llaves reales. `MERCADO_PAGO_MOCK=1` arma una preferencia falsa y redirige a `/pago/exito` sin hablar con MP; no lo prendas en Vercel.
+ 
+-## Setup
++## Setup de base
+ 
+-1. SQL: `schema.sql` luego `migration_v7.sql`  
+-2. `.env.local` con keys Supabase (+ opcional Resend)  
+-3. `npm install` → `npm run seed:supabase` → `npm run dev`  
++1. SQL, en orden: `schema.sql`, `migration_v7.sql`, `migration_v9.sql`, `migration_v10.sql`, `migration_v14_pago.sql`
++2. `.env.local` a partir de `.env.example`
++3. `npm install` → `npm run seed:supabase` → `npm run dev`
+ 
+-## Seguridad (estado actual)
++## Seguridad
+ 
+-- Secret key solo en servidor  
+-- Passwords con bcrypt  
+-- OTP hasheado  
+-- Shipping **aún no cifrado** en BD (JSONB plano)  
++- La secret key de Supabase y el access token de MP solo viven en el servidor.
++- Contraseñas con bcrypt. OTP hasheado.
++- El webhook no aplica un pago si la firma no coincide.
++- El envío sigue en JSONB plano (no cifrado).
+diff --git a/package.json b/package.json
+index 326eb85..0bd5906 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,8 @@
+     "build": "next build",
+     "start": "next start",
+     "lint": "eslint",
+-    "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs"
++    "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs",
++    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs"
+   },
+   "dependencies": {
+     "@supabase/server": "^1.8.0",
+diff --git a/scripts/test-pago.mjs b/scripts/test-pago.mjs
+new file mode 100644
+index 0000000..2d55ddc
+--- /dev/null
++++ b/scripts/test-pago.mjs
+@@ -0,0 +1,208 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { buildPaymentPatch, readOrderIdFromPayment, reservationIsStale, centavosToUnitPrice, RESERVATION_TTL_MS } from "../src/lib/store/payment-decision.js";
++import {
++  createCheckoutPreference,
++  mpCurrency,
++  readWebhookNotification,
++  signMercadoPagoWebhook,
++  verifyMercadoPagoWebhook,
++} from "../src/lib/store/mercadopago.js";
++import { createPreferenceForOrder } from "../src/lib/store/payments.js";
++import { calculateSalePrice, normalizeSpotMap, validateShippingMx } from "../src/lib/store/mx-validate.js";
++import { assertStatusTransition } from "../src/lib/store/order-status.js";
++
++process.env.MERCADO_PAGO_MOCK = "1";
++process.env.MERCADO_PAGO_COUNTRY = "MX";
++process.env.MERCADO_PAGO_WEBHOOK_SECRET = "secreto-de-prueba";
++
++const baseOrder = {
++  id: "ord_1",
++  status: "recibido",
++  paymentStatus: "pendiente",
++  mpPaymentId: null,
++  mpStatus: null,
++  mpPreferenceId: null,
++};
++
++test("precio spot: spot × peso × 1.35 × 1.16", () => {
++  const sale = calculateSalePrice({ weightGrams: 2, spotPerGram: 100, marginPercent: 35, ivaPercent: 16 });
++  assert.equal(sale.pesos, 313.2);
++  assert.equal(sale.centavos, 31320);
++});
++
++test("spot 18k y 18K se unifican", () => {
++  const map = normalizeSpotMap({ "18k": "100", "18K": 80, "14k": "", "99K": 10 });
++  assert.deepEqual(map, { "18K": 100 });
++});
++
++test("envío de México exige todos los campos", () => {
++  assert.match(validateShippingMx({ fullName: "Ana" }) || "", /obligatorios/);
++  const ok = {
++    fullName: "Ana López",
++    phone: "5512345678",
++    street: "Reforma",
++    extNumber: "10",
++    intNumber: "S/N",
++    neighborhood: "Centro",
++    city: "CDMX",
++    state: "Ciudad de México",
++    zip: "06000",
++    betweenStreets: "Insurgentes y Balderas",
++    references: "Portón negro",
++  };
++  assert.equal(validateShippingMx(ok), null);
++  assert.match(validateShippingMx({ ...ok, state: "Texas" }) || "", /estado/i);
++});
++
++test("centavos a pesos de Mercado Pago", () => {
++  assert.equal(centavosToUnitPrice(1999), 19.99);
++  assert.equal(mpCurrency(), "MXN");
++});
++
++test("firma de webhook igual al manifiesto de WapiFood", () => {
++  const dataId = "PAY123abc";
++  const requestId = "req-1";
++  const ts = "1700000000";
++  const header = signMercadoPagoWebhook({
++    secret: process.env.MERCADO_PAGO_WEBHOOK_SECRET,
++    dataId,
++    requestId,
++    ts,
++  });
++  const req = { headers: { "x-signature": header, "x-request-id": requestId } };
++  assert.deepEqual(verifyMercadoPagoWebhook(req, dataId), { ok: true });
++  assert.equal(verifyMercadoPagoWebhook(req, "otro").ok, false);
++  assert.equal(verifyMercadoPagoWebhook({ headers: {} }, dataId).reason, "sin firma");
++});
++
++test("lee topic payment.created y data.id", () => {
++  const note = readWebhookNotification({
++    method: "POST",
++    url: "/api/mercadopago/webhook?data.id=999&type=payment",
++    body: { action: "payment.created", data: { id: "999" } },
++  });
++  assert.equal(note.topic, "payment");
++  assert.equal(note.paymentId, "999");
++  assert.equal(note.signatureId, "999");
++});
++
++test("preferencia: external_reference es el pedido y el precio va en pesos", async () => {
++  const pref = await createPreferenceForOrder({
++    order: {
++      id: "ord_test",
++      userId: "usr_1",
++      items: [{ productId: "prd_1", name: "Anillo sello", price: 1999 }],
++    },
++    payer: { id: "usr_1", email: "ana@correo.mx", name: "Ana" },
++    req: { headers: { host: "localhost:3000", "x-forwarded-proto": "http" } },
++  });
++  assert.equal(pref.external_reference, "ord_test");
++  assert.equal(pref.items[0].unit_price, 19.99);
++  assert.equal(pref.items[0].currency_id, "MXN");
++  assert.equal(pref.items[0].quantity, 1);
++  assert.equal(pref.notification_url, "http://localhost:3000/api/mercadopago/webhook");
++  assert.equal(pref.back_urls.success, "http://localhost:3000/pago/exito");
++  assert.equal(pref.back_urls.pending, "http://localhost:3000/pago/pendiente");
++  assert.equal(pref.back_urls.failure, "http://localhost:3000/pago/fallo");
++  assert.match(pref.init_point, /pago\/exito/);
++});
++
++test("createCheckoutPreference reintenta sin auto_return si MP lo rechaza", async () => {
++  const original = global.fetch;
++  let calls = 0;
++  global.fetch = async (_url, init) => {
++    calls += 1;
++    const body = JSON.parse(init.body);
++    if (calls === 1) {
++      assert.equal(body.auto_return, "approved");
++      return new Response(JSON.stringify({ message: "auto_return invalid" }), { status: 400 });
++    }
++    assert.equal(body.auto_return, undefined);
++    assert.equal(body.external_reference, "ord_retry");
++    return new Response(JSON.stringify({ id: "pref_ok", init_point: "https://mp.test/ok" }), { status: 201 });
++  };
++  process.env.MERCADO_PAGO_MOCK = "0";
++  process.env.MERCADO_PAGO_ACCESS_TOKEN = "TEST-token";
++  try {
++    const pref = await createCheckoutPreference({
++      items: [{ title: "Pieza", quantity: 1, unit_price: 10, currency_id: "MXN" }],
++      external_reference: "ord_retry",
++      auto_return: "approved",
++      notification_url: "https://ejemplo.mx/api/mercadopago/webhook",
++    });
++    assert.equal(pref.id, "pref_ok");
++    assert.equal(calls, 2);
++  } finally {
++    global.fetch = original;
++    process.env.MERCADO_PAGO_MOCK = "1";
++    delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
++  }
++});
++
++test("aprobado confirma y vende; el repetido no hace nada", () => {
++  const first = buildPaymentPatch(baseOrder, { id: 55, status: "approved", preference_id: "pref_1" });
++  assert.equal(first.action, "approve");
++  assert.equal(first.confirm, true);
++  assert.equal(first.release, false);
++  assert.equal(first.patch.paymentStatus, "pagado");
++  assert.equal(first.patch.status, "confirmado");
++
++  const again = buildPaymentPatch(
++    { ...baseOrder, paymentStatus: "pagado", mpPaymentId: "55", mpStatus: "approved", status: "confirmado" },
++    { id: 55, status: "approved" },
++  );
++  assert.equal(again.action, "noop");
++});
++
++test("pendiente no libera; rechazado cancela y libera; reembolso también", () => {
++  const pending = buildPaymentPatch(baseOrder, { id: 7, status: "pending" });
++  assert.equal(pending.action, "pending");
++  assert.equal(pending.release, false);
++  assert.equal(pending.patch.paymentStatus, "pendiente");
++
++  const rejected = buildPaymentPatch(
++    { ...baseOrder, mpPaymentId: "7", mpStatus: "pending" },
++    { id: 7, status: "rejected" },
++  );
++  assert.equal(rejected.action, "fail");
++  assert.equal(rejected.release, true);
++  assert.equal(rejected.patch.status, "cancelado");
++  assert.equal(rejected.patch.paymentStatus, "rechazado");
++
++  const refund = buildPaymentPatch(
++    { ...baseOrder, status: "confirmado", paymentStatus: "pagado", mpPaymentId: "7", mpStatus: "approved" },
++    { id: 7, status: "refunded" },
++  );
++  assert.equal(refund.action, "refund");
++  assert.equal(refund.release, true);
++  assert.equal(refund.patch.paymentStatus, "reembolsado");
++});
++
++test("un pago ya aprobado no se degrada con un rechazo tardío", () => {
++  const late = buildPaymentPatch(
++    { ...baseOrder, status: "confirmado", paymentStatus: "pagado", mpPaymentId: "9", mpStatus: "approved" },
++    { id: 10, status: "rejected" },
++  );
++  assert.equal(late.action, "noop");
++  assert.equal(late.reason, "ya pagado");
++});
++
++test("external_reference plano y metadata", () => {
++  assert.equal(readOrderIdFromPayment({ external_reference: "ord_abc" }), "ord_abc");
++  assert.equal(readOrderIdFromPayment({ metadata: { order_id: "ord_meta" } }), "ord_meta");
++});
++
++test("la reserva de una pieza en envío no vence; la abandonada sí", () => {
++  const product = { reservedOrderId: "ord_1", sold: false, reservedAt: new Date(Date.now() - RESERVATION_TTL_MS - 1000).toISOString() };
++  assert.equal(reservationIsStale(product, { ...baseOrder, status: "en_envio", paymentStatus: "pendiente" }), false);
++  assert.equal(reservationIsStale(product, { ...baseOrder, mpStatus: "pending" }), false);
++  assert.equal(reservationIsStale(product, { ...baseOrder, paymentStatus: "pendiente", mpStatus: null }), true);
++});
++
++test("no se puede regresar el estatus ni reabrir un cancelado sin el pago", () => {
++  assert.throws(() => assertStatusTransition("enviado", "recibido"), /regresar/);
++  assert.throws(() => assertStatusTransition("cancelado", "confirmado"), /cancelado/);
++  assert.doesNotThrow(() => assertStatusTransition("cancelado", "confirmado", { allowReopen: true }));
++  assert.doesNotThrow(() => assertStatusTransition("recibido", "cancelado"));
++});
+diff --git a/src/components/AuthProvider.js b/src/components/AuthProvider.js
+index c20ece7..2790362 100644
+--- a/src/components/AuthProvider.js
++++ b/src/components/AuthProvider.js
+@@ -1,4 +1,4 @@
+-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
++import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+ import {
+   clearSession,
+   getStoredToken,
+@@ -6,6 +6,7 @@ import {
+   setSession,
+ } from "@/lib/store/auth-client";
+ import { api } from "@/lib/store/client";
++import { mergeGuestCart } from "@/lib/store/guest-cart";
+ 
+ const AuthContext = createContext({
+   user: null,
+@@ -20,6 +21,7 @@ export function AuthProvider({ children }) {
+   const [user, setUser] = useState(null);
+   const [token, setToken] = useState(null);
+   const [loading, setLoading] = useState(true);
++  const mergedFor = useRef("");
+ 
+   const hydrate = useCallback(() => {
+     const t = getStoredToken();
+@@ -80,6 +82,25 @@ export function AuthProvider({ children }) {
+     };
+   }, [hydrate, refresh]);
+ 
++  useEffect(() => {
++    if (loading || !token || !user || user.role === "admin") return;
++    if (mergedFor.current === token) return;
++    mergedFor.current = token;
++    mergeGuestCart()
++      .then((result) => {
++        if (result?.dropped) {
++          sessionStorage.setItem(
++            "ol_cart_notice",
++            "Algunas piezas del carrito ya no estaban disponibles",
++          );
++        }
++        window.dispatchEvent(new Event("ol-cart-change"));
++      })
++      .catch(() => {
++        mergedFor.current = "";
++      });
++  }, [loading, token, user]);
++
+   const value = useMemo(
+     () => ({ user, token, loading, refresh, logout, setAuth }),
+     [user, token, loading, refresh, logout, setAuth],
+diff --git a/src/components/CartDrawer.js b/src/components/CartDrawer.js
+index ee4d537..68c633a 100644
+--- a/src/components/CartDrawer.js
++++ b/src/components/CartDrawer.js
+@@ -15,11 +15,14 @@ export function CartDrawer({ open, onClose }) {
+     try {
+       const { products } = await api.products();
+       setCatalog(products);
+-      if (token && user) {
+-        const { cart } = await api.cart();
+-        setItems(cart.items || []);
++      if (token && user && user.role !== "admin") {
++        const { cart, products: mine } = await api.cart();
++        setCatalog(mine || []);
++        setItems((cart.items || []).map((item) => ({ ...item, quantity: 1 })));
++      } else if (!token || !user) {
++        setItems(getGuestCart().map((item) => ({ ...item, quantity: 1 })));
+       } else {
+-        setItems(getGuestCart());
++        setItems([]);
+       }
+     } catch (e) {
+       setMsg(e.message);
+@@ -35,16 +38,13 @@ export function CartDrawer({ open, onClose }) {
+   }, [open, token, user]);
+ 
+   const rows = useMemo(() => {
+-    return items
+-      .map((i) => {
+-        const p = catalog.find((x) => x.id === i.productId);
+-        if (!p) return null;
+-        return { ...i, product: p };
+-      })
+-      .filter(Boolean);
++    return items.map((i) => {
++      const p = catalog.find((x) => x.id === i.productId) || null;
++      return { ...i, quantity: 1, product: p };
++    });
+   }, [items, catalog]);
+ 
+-  const total = rows.reduce((s, r) => s + r.product.price * r.quantity, 0);
++  const total = rows.reduce((s, r) => s + (r.product ? r.product.price : 0), 0);
+   const count = rows.reduce((s, r) => s + r.quantity, 0);
+ 
+   async function setQty(productId, quantity) {
+@@ -56,7 +56,7 @@ export function CartDrawer({ open, onClose }) {
+         quantity <= 0
+           ? getGuestCart().filter((i) => i.productId !== productId)
+           : getGuestCart().map((i) =>
+-              i.productId === productId ? { ...i, quantity } : i,
++              i.productId === productId ? { ...i, quantity: 1 } : i,
+             );
+       setGuestCart(next);
+       setItems(next);
+@@ -90,10 +90,12 @@ export function CartDrawer({ open, onClose }) {
+             <div className="space-y-4">
+               {rows.map((r) => (
+                 <div key={r.productId} className="flex gap-3 rounded-[var(--radius-lg)] border border-border bg-surface p-3">
+-                  <img src={r.product.image} alt="" className="size-16 rounded-md object-cover bg-elevated" />
++                  <img src={r.product?.image || ""} alt="" className="size-16 rounded-md object-cover bg-elevated" />
+                   <div className="flex-1">
+-                    <p className="font-display text-lg leading-tight">{r.product.name}</p>
+-                    <p className="text-sm tabular-nums text-muted">{formatMxn(r.product.price)}</p>
++                    <p className="font-display text-lg leading-tight">{r.product?.name || "Pieza no disponible"}</p>
++                    <p className="text-sm tabular-nums text-muted">
++                      {r.product ? formatMxn(r.product.price) : "Quítala del carrito"}
++                    </p>
+                     <div className="mt-2 flex items-center gap-2">
+                       <button type="button" className="size-8 rounded-full border border-border" onClick={() => setQty(r.productId, r.quantity - 1)}>−</button>
+                       <span className="tabular-nums text-sm">{r.quantity}</span>
+diff --git a/src/components/PaymentReturn.js b/src/components/PaymentReturn.js
+new file mode 100644
+index 0000000..24c5751
+--- /dev/null
++++ b/src/components/PaymentReturn.js
+@@ -0,0 +1,28 @@
++import Link from "next/link";
++import { PageShell } from "@/components/SiteChrome";
++
++export function PaymentReturn({ kicker, title, children }) {
++  return (
++    <PageShell>
++      <section className="mx-auto max-w-lg px-5 py-20 text-center md:px-8">
++        <p className="text-xs tracking-[0.28em] uppercase text-gold">{kicker}</p>
++        <h1 className="mt-3 font-display text-4xl">{title}</h1>
++        <div className="mt-4 space-y-3 text-muted">{children}</div>
++        <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:justify-center">
++          <Link
++            href="/cuenta"
++            className="inline-flex h-12 items-center justify-center rounded-full bg-gold px-8 text-xs tracking-[0.18em] uppercase text-bg"
++          >
++            Ver mis pedidos
++          </Link>
++          <Link
++            href="/tienda"
++            className="inline-flex h-12 items-center justify-center rounded-full border border-border px-8 text-xs tracking-[0.18em] uppercase"
++          >
++            Volver a la colección
++          </Link>
++        </div>
++      </section>
++    </PageShell>
++  );
++}
+diff --git a/src/components/SiteChrome.js b/src/components/SiteChrome.js
+index 3a3629b..c8f87fd 100644
+--- a/src/components/SiteChrome.js
++++ b/src/components/SiteChrome.js
+@@ -61,9 +61,20 @@ export function SiteHeader() {
+           <Link href="/guias" onClick={() => setOpen(false)}>Guías</Link>
+           <Link href="/cuenta" onClick={() => setOpen(false)}>{isLoggedIn ? "Mi cuenta" : "Entrar"}</Link>
+           {user?.role === "admin" ? (
+-            <>
+-              <Link href="/admin" onClick={() => setOpen(false)}>Atelier</Link>
+-            </>
++            <Link href="/admin" onClick={() => setOpen(false)}>Atelier</Link>
++          ) : null}
++          {isLoggedIn ? (
++            <button
++              type="button"
++              className="text-left hover:text-gold"
++              onClick={async () => {
++                setOpen(false);
++                await logout();
++                router.push("/");
++              }}
++            >
++              Salir
++            </button>
+           ) : null}
+         </div>
+       ) : null}
+diff --git a/src/lib/store/client.js b/src/lib/store/client.js
+index 82b0127..6b9b63f 100644
+--- a/src/lib/store/client.js
++++ b/src/lib/store/client.js
+@@ -75,6 +75,16 @@ export const api = {
+       method: "POST",
+       body: JSON.stringify(shipping),
+     }),
++  mpCheckout: (orderId) =>
++    request("/api/mercadopago/checkout", {
++      method: "POST",
++      body: JSON.stringify({ orderId }),
++    }),
++  syncPayment: (paymentId) =>
++    request("/api/mercadopago/sync", {
++      method: "POST",
++      body: JSON.stringify({ paymentId }),
++    }),
+   orders: () => request("/api/orders"),
+   adminProducts: () => request("/api/admin/products"),
+   adminCreateProduct: (product) =>
+diff --git a/src/lib/store/guest-cart.js b/src/lib/store/guest-cart.js
+new file mode 100644
+index 0000000..c0bedcd
+--- /dev/null
++++ b/src/lib/store/guest-cart.js
+@@ -0,0 +1,35 @@
++import { api } from "./client";
++import { clearGuestCart, getGuestCart } from "./auth-client";
++
++let inflight = null;
++
++/** Pasa el carrito local al carrito del cliente. Las piezas que ya no existen se descartan. */
++export function mergeGuestCart() {
++  if (typeof window === "undefined") return Promise.resolve({ merged: 0, dropped: 0 });
++  if (inflight) return inflight;
++  const guest = getGuestCart();
++  if (!guest.length) return Promise.resolve({ merged: 0, dropped: 0 });
++
++  inflight = (async () => {
++    let merged = 0;
++    let dropped = 0;
++    for (const item of guest) {
++      if (!item?.productId) {
++        dropped += 1;
++        continue;
++      }
++      try {
++        await api.addToCart(item.productId, 1);
++        merged += 1;
++      } catch {
++        dropped += 1;
++      }
++    }
++    clearGuestCart();
++    return { merged, dropped };
++  })().finally(() => {
++    inflight = null;
++  });
++
++  return inflight;
++}
+diff --git a/src/lib/store/mercadopago.js b/src/lib/store/mercadopago.js
+new file mode 100644
+index 0000000..bcd7a39
+--- /dev/null
++++ b/src/lib/store/mercadopago.js
+@@ -0,0 +1,211 @@
++import crypto from "crypto";
++
++/**
++ * Cliente Mercado Pago adaptado de NewWapifood (`src/lib/mercadopago.js`).
++ * Misma API HTTP, misma firma de webhook y las mismas variables de entorno.
++ * WapiFood cobra planes (external_reference JSON). Aquí el external_reference
++ * es el id del pedido: es el dato que el webhook necesita para esta tienda.
++ *
++ * No usa el SDK de navegador. Checkout Pro redirige a init_point.
++ * MERCADO_PAGO_PUBLIC_KEY queda en el entorno (igual que WapiFood) y no se lee.
++ */
++
++const MP_API = "https://api.mercadopago.com";
++
++export function isMpMock() {
++  return String(process.env.MERCADO_PAGO_MOCK || "") === "1";
++}
++
++export function getMpToken() {
++  const token = (process.env.MERCADO_PAGO_ACCESS_TOKEN || "").trim();
++  if (!token && isMpMock()) return "TEST-MOCK";
++  return token;
++}
++
++function headerValue(headers, name) {
++  if (!headers) return "";
++  if (typeof headers.get === "function") return headers.get(name) || "";
++  const raw = headers[name] ?? headers[name.toLowerCase()];
++  if (Array.isArray(raw)) return raw[0] || "";
++  return raw || "";
++}
++
++/**
++ * URL pública del sitio sin variable nueva.
++ * Igual que WapiFood: origen de la petición y, si no viene,
++ * VERCEL_PROJECT_PRODUCTION_URL / VERCEL_URL.
++ */
++export function getSiteUrl(request) {
++  if (request) {
++    const origin = headerValue(request.headers, "origin");
++    if (origin) return String(origin).replace(/\/$/, "");
++    const host = headerValue(request.headers, "x-forwarded-host") || headerValue(request.headers, "host");
++    if (host) {
++      const proto = headerValue(request.headers, "x-forwarded-proto") || "https";
++      return `${proto}://${host}`.replace(/\/$/, "");
++    }
++  }
++  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || "";
++  if (vercel) {
++    const host = vercel.replace(/^https?:\/\//, "").replace(/\/$/, "");
++    return `https://${host}`;
++  }
++  return "http://localhost:3000";
++}
++
++export function mpCurrency() {
++  const country = (process.env.MERCADO_PAGO_COUNTRY || "MX").trim().toUpperCase();
++  const map = {
++    MX: "MXN",
++    AR: "ARS",
++    BR: "BRL",
++    CL: "CLP",
++    CO: "COP",
++    PE: "PEN",
++    UY: "UYU",
++  };
++  return map[country] || "MXN";
++}
++
++export async function mpFetch(path, { method = "GET", body } = {}) {
++  if (isMpMock()) {
++    if (method === "POST" && path === "/checkout/preferences") {
++      const id = `pref_mock_${Date.now().toString(36)}`;
++      const back = body?.back_urls?.success || "http://localhost:3000/pago/exito";
++      return {
++        id,
++        init_point: `${back}?preference_id=${id}&mock=1`,
++        sandbox_init_point: `${back}?preference_id=${id}&mock=1`,
++        external_reference: body?.external_reference || null,
++        notification_url: body?.notification_url || null,
++        items: body?.items || [],
++        back_urls: body?.back_urls || null,
++      };
++    }
++    if (String(path).startsWith("/v1/payments/")) {
++      const id = String(path).split("/").pop();
++      const stored = globalThis.__OL_MP_PAYMENTS?.[id];
++      if (stored) return stored;
++      const err = new Error("Pago mock no encontrado");
++      err.status = 404;
++      throw err;
++    }
++  }
++
++  const token = getMpToken();
++  if (!token) throw new Error("Falta MERCADO_PAGO_ACCESS_TOKEN");
++  const res = await fetch(`${MP_API}${path}`, {
++    method,
++    headers: {
++      Authorization: `Bearer ${token}`,
++      "Content-Type": "application/json",
++    },
++    body: body ? JSON.stringify(body) : undefined,
++  });
++  const data = await res.json().catch(() => ({}));
++  if (!res.ok) {
++    const msg = data?.message || data?.error || `Mercado Pago HTTP ${res.status}`;
++    const err = new Error(msg);
++    err.detail = data;
++    err.status = res.status;
++    throw err;
++  }
++  return data;
++}
++
++/**
++ * Firma oficial de webhooks de Mercado Pago (header x-signature + secreto).
++ * data.id se toma de la query. Si es alfanumérico, va en minúsculas.
++ * Acepta el Request de App Router y el req de Pages Router.
++ */
++export function verifyMercadoPagoWebhook(request, dataId) {
++  const secret = (process.env.MERCADO_PAGO_WEBHOOK_SECRET || "").trim();
++  if (!secret) {
++    return { ok: false, reason: "falta MERCADO_PAGO_WEBHOOK_SECRET" };
++  }
++  const xSignature = headerValue(request?.headers, "x-signature");
++  const xRequestId = headerValue(request?.headers, "x-request-id") || "";
++  if (!xSignature) {
++    return { ok: false, reason: "sin firma" };
++  }
++
++  let ts = "";
++  let hash = "";
++  for (const part of xSignature.split(",")) {
++    const idx = part.indexOf("=");
++    if (idx === -1) continue;
++    const key = part.slice(0, idx).trim();
++    const value = part.slice(idx + 1).trim();
++    if (key === "ts") ts = value;
++    if (key === "v1") hash = value;
++  }
++  if (!ts || !hash || dataId == null || String(dataId).trim() === "") {
++    return { ok: false, reason: "firma incompleta" };
++  }
++
++  const id = String(dataId).toLowerCase();
++  const manifest = `id:${id};request-id:${xRequestId};ts:${ts};`;
++  const expected = crypto.createHmac("sha256", secret).update(manifest).digest("hex");
++  const a = Buffer.from(expected);
++  const b = Buffer.from(hash);
++  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
++    return { ok: false, reason: "firma inválida" };
++  }
++  return { ok: true };
++}
++
++export function signMercadoPagoWebhook({ secret, dataId, requestId, ts }) {
++  const id = String(dataId).toLowerCase();
++  const manifest = `id:${id};request-id:${requestId || ""};ts:${ts};`;
++  const v1 = crypto.createHmac("sha256", secret).update(manifest).digest("hex");
++  return `ts=${ts},v1=${v1}`;
++}
++
++/** topic/id tal como los lee el webhook de WapiFood (query + body). */
++export function readWebhookNotification(req) {
++  const rawUrl = req.url || req.originalUrl || "/api/mercadopago/webhook";
++  const url = new URL(rawUrl, "http://localhost");
++  const q = req.query || {};
++  let topic = url.searchParams.get("topic") || url.searchParams.get("type") || q.topic || q.type || "";
++  let paymentId =
++    url.searchParams.get("id") ||
++    url.searchParams.get("data.id") ||
++    q.id ||
++    q["data.id"] ||
++    q.data?.id ||
++    "";
++  const payload = req.body && typeof req.body === "object" ? req.body : {};
++
++  if (req.method === "POST") {
++    topic = topic || payload.topic || payload.type || payload.action;
++    paymentId =
++      paymentId ||
++      payload?.data?.id ||
++      (payload?.resource ? String(payload.resource).split("/").pop() : null);
++  }
++
++  if (topic && String(topic).includes("payment")) topic = "payment";
++  const signatureId = url.searchParams.get("data.id") || q["data.id"] || q.data?.id || paymentId;
++  return {
++    topic: topic || "",
++    paymentId: paymentId != null ? String(paymentId) : "",
++    signatureId: signatureId != null ? String(signatureId) : "",
++  };
++}
++
++/**
++ * Crea la preferencia. Si MP rechaza auto_return o notification_url
++ * (típico en http://localhost), reintenta sin ese campo.
++ */
++export async function createCheckoutPreference(body) {
++  try {
++    return await mpFetch("/checkout/preferences", { method: "POST", body });
++  } catch (error) {
++    const msg = JSON.stringify(error.detail || error.message || "");
++    if (!/auto_return|back_url|notification_url/i.test(msg)) throw error;
++    const relaxed = { ...body };
++    if (/auto_return|back_url/i.test(msg)) delete relaxed.auto_return;
++    if (/notification_url/i.test(msg)) delete relaxed.notification_url;
++    return mpFetch("/checkout/preferences", { method: "POST", body: relaxed });
++  }
++}
+diff --git a/src/lib/store/mx-validate.js b/src/lib/store/mx-validate.js
+index af4e940..879f25e 100644
+--- a/src/lib/store/mx-validate.js
++++ b/src/lib/store/mx-validate.js
+@@ -45,6 +45,78 @@ export function validateZipMx(zip) {
+   return null;
+ }
+ 
++export const SHIPPING_REQUIRED = [
++  "fullName",
++  "phone",
++  "street",
++  "extNumber",
++  "intNumber",
++  "neighborhood",
++  "city",
++  "state",
++  "zip",
++  "betweenStreets",
++  "references",
++];
++
++/** null si la dirección de México está completa; si no, el mensaje de error. */
++export function validateShippingMx(shipping) {
++  const s = shipping || {};
++  for (const key of SHIPPING_REQUIRED) {
++    if (!String(s[key] ?? "").trim()) {
++      return "Completa todos los datos de envío (todos son obligatorios)";
++    }
++  }
++  if (onlyDigits(s.phone, 10).length !== 10) return "Teléfono a 10 dígitos (México)";
++  const zipErr = validateZipMx(s.zip);
++  if (zipErr) return zipErr;
++  if (!MX_STATES.includes(String(s.state).trim())) return "Selecciona un estado de México";
++  return null;
++}
++
++export function sanitizeShipping(shipping) {
++  const s = shipping || {};
++  return {
++    fullName: onlyLettersSpaces(s.fullName, 80).trim(),
++    phone: onlyDigits(s.phone, 10),
++    street: String(s.street || "").trim().slice(0, 80),
++    extNumber: String(s.extNumber || "").trim().slice(0, 10),
++    intNumber: String(s.intNumber || "").trim().slice(0, 10),
++    neighborhood: String(s.neighborhood || "").trim().slice(0, 60),
++    city: onlyLettersSpaces(s.city, 60).trim(),
++    state: String(s.state || "").trim().slice(0, 40),
++    zip: onlyDigits(s.zip, 5),
++    references: String(s.references || "").trim().slice(0, 120),
++    betweenStreets: String(s.betweenStreets || "").trim().slice(0, 80),
++  };
++}
++
++/** "18k" / "18" / "18K" → "18K". Vacío si no es un kilataje 1–24. */
++export function normalizeKaratKey(value) {
++  const raw = String(value || "").trim().toUpperCase().replace(/\s+/g, "");
++  if (!raw) return "";
++  const match = raw.match(/^(\d{1,2})K?$/);
++  if (!match) return "";
++  const n = Number(match[1]);
++  if (n < 1 || n > 24) return "";
++  return `${n}K`;
++}
++
++/** Unifica llaves de spot (18k y 18K) y descarta precios vacíos o cero. */
++export function normalizeSpotMap(input) {
++  const out = {};
++  for (const [key, value] of Object.entries(input || {})) {
++    const karat = normalizeKaratKey(key);
++    if (!karat) continue;
++    if (value === "" || value == null) continue;
++    const n = Number(value);
++    if (!Number.isFinite(n) || n <= 0) continue;
++    const rounded = Math.round(n * 100) / 100;
++    if (out[karat] == null || rounded > out[karat]) out[karat] = rounded;
++  }
++  return out;
++}
++
+ export function formatMxnFromCentavos(cents) {
+   const n = Number(cents || 0) / 100;
+   return new Intl.NumberFormat("es-MX", {
+diff --git a/src/lib/store/order-status.js b/src/lib/store/order-status.js
+index 134c102..7862d64 100644
+--- a/src/lib/store/order-status.js
++++ b/src/lib/store/order-status.js
+@@ -27,3 +27,43 @@ export function isOrderLocked(status) {
+ export function canEditShipping(status) {
+   return status === "recibido" || status === "confirmado";
+ }
++
++const FLOW = ["recibido", "confirmado", "en_envio", "enviado", "finalizado"];
++
++/** Impide regresos. Cancelar siempre se puede, salvo finalizado. Un pago aprobado puede reabrir un cancelado. */
++export function assertStatusTransition(from, to, { allowReopen = false } = {}) {
++  if (!to || from === to) return;
++  if (from === "finalizado") {
++    throw new Error("Un pedido finalizado no puede cambiar de estatus");
++  }
++  if (from === "cancelado") {
++    if (allowReopen && to === "confirmado") return;
++    throw new Error("Un pedido cancelado no puede cambiar de estatus");
++  }
++  if (to === "cancelado") return;
++  const fromIdx = FLOW.indexOf(from);
++  const toIdx = FLOW.indexOf(to);
++  if (fromIdx < 0 || toIdx < 0 || toIdx < fromIdx) {
++    throw new Error("No se puede regresar el estatus del pedido");
++  }
++}
++
++export const PAYMENT_LABELS = {
++  pendiente: "Pago pendiente",
++  pagado: "Pagado",
++  rechazado: "Pago rechazado",
++  cancelado: "Pago cancelado",
++  reembolsado: "Pago reembolsado",
++};
++
++export function paymentLabel(status) {
++  if (!status) return "Sin registro de pago";
++  return PAYMENT_LABELS[status] || status;
++}
++
++/** Pedidos viejos (sin payment_status) y los pagados sí se pueden despachar. */
++export function canAdvanceFulfillment(order) {
++  const pay = order?.paymentStatus;
++  if (!pay || pay === "pagado") return true;
++  return false;
++}
+diff --git a/src/lib/store/payment-decision.js b/src/lib/store/payment-decision.js
+new file mode 100644
+index 0000000..39431f3
+--- /dev/null
++++ b/src/lib/store/payment-decision.js
+@@ -0,0 +1,163 @@
++/**
++ * Decisiones puras del pago (sin red ni base de datos).
++ * El webhook de Mercado Pago consulta el pago y luego aplica este resultado.
++ */
++
++export const RESERVATION_TTL_MS = 2 * 60 * 60 * 1000;
++
++const PENDING_MP = new Set(["pending", "in_process", "in_mediation", "authorized"]);
++const UNSHIPPED = new Set(["recibido", "confirmado"]);
++
++export function centavosToUnitPrice(cents) {
++  const n = Math.round(Number(cents) || 0);
++  return n / 100;
++}
++
++export function readOrderIdFromPayment(payment) {
++  const ref = payment?.external_reference;
++  if (ref && typeof ref === "object") {
++    if (ref.orderId) return String(ref.orderId);
++    if (ref.order_id) return String(ref.order_id);
++  }
++  const text = ref == null ? "" : String(ref).trim();
++  if (text.startsWith("{")) {
++    try {
++      const parsed = JSON.parse(text);
++      if (parsed.orderId || parsed.order_id) return String(parsed.orderId || parsed.order_id);
++    } catch {
++      /* external_reference plano */
++    }
++  }
++  if (text && !text.includes("|")) return text;
++  const meta = payment?.metadata || {};
++  if (meta.order_id) return String(meta.order_id);
++  if (meta.orderId) return String(meta.orderId);
++  return "";
++}
++
++/**
++ * Reserva vencida solo si nadie empezó un pago en efectivo / en proceso.
++ * Un ticket pendiente (OXXO, SPEI) no se libera a las 2 horas.
++ */
++export function reservationIsStale(product, order, now = Date.now()) {
++  if (!product?.reservedOrderId) return false;
++  if (product.sold) return false;
++  if (!order) return true;
++  if (order.paymentStatus === "pagado") return false;
++  if (["en_envio", "enviado", "finalizado"].includes(order.status)) return false;
++  const mp = String(order.mpStatus || "");
++  if (PENDING_MP.has(mp)) return false;
++  const started = new Date(product.reservedAt || order.createdAt || 0).getTime();
++  if (!Number.isFinite(started) || started <= 0) return false;
++  return now - started > RESERVATION_TTL_MS;
++}
++
++function basePatch(order, payment) {
++  const paymentId = payment?.id != null ? String(payment.id) : "";
++  return {
++    mpPaymentId: paymentId || order.mpPaymentId || null,
++    mpPreferenceId: payment?.preference_id || order.mpPreferenceId || null,
++    mpStatus: payment?.status ? String(payment.status) : order.mpStatus || null,
++    mpStatusDetail: payment?.status_detail ? String(payment.status_detail) : "",
++  };
++}
++
++/**
++ * @returns {{
++ *   action: "noop"|"approve"|"pending"|"fail"|"refund",
++ *   reason?: string,
++ *   patch: object|null,
++ *   release: boolean,
++ *   confirm: boolean,
++ * }}
++ */
++export function buildPaymentPatch(order, payment) {
++  const mpStatus = String(payment?.status || "");
++  const paymentId = payment?.id != null ? String(payment.id) : "";
++  const base = basePatch(order, payment);
++
++  if (
++    paymentId &&
++    order.mpPaymentId === paymentId &&
++    order.mpStatus === mpStatus &&
++    order.paymentStatus
++  ) {
++    return { action: "noop", reason: "ya procesado", patch: null, release: false, confirm: false };
++  }
++
++  if (order.paymentStatus === "pagado" && mpStatus !== "refunded" && mpStatus !== "charged_back") {
++    return { action: "noop", reason: "ya pagado", patch: null, release: false, confirm: false };
++  }
++
++  if (mpStatus === "approved") {
++    const canConfirm = order.status === "recibido" || order.status === "cancelado";
++    return {
++      action: "approve",
++      patch: {
++        ...base,
++        paymentStatus: "pagado",
++        paidAt: payment.date_approved || new Date().toISOString(),
++        status: canConfirm ? "confirmado" : undefined,
++        allowReopen: order.status === "cancelado",
++        note: "Pago aprobado en Mercado Pago",
++      },
++      release: false,
++      confirm: true,
++    };
++  }
++
++  if (PENDING_MP.has(mpStatus)) {
++    return {
++      action: "pending",
++      patch: {
++        ...base,
++        paymentStatus: "pendiente",
++        note: "Pago pendiente en Mercado Pago",
++      },
++      release: false,
++      confirm: false,
++    };
++  }
++
++  if (mpStatus === "rejected" || mpStatus === "cancelled") {
++    const unshipped = UNSHIPPED.has(order.status);
++    const paymentStatus = mpStatus === "cancelled" ? "cancelado" : "rechazado";
++    return {
++      action: "fail",
++      patch: {
++        ...base,
++        paymentStatus,
++        status: unshipped ? "cancelado" : undefined,
++        note:
++          mpStatus === "cancelled"
++            ? "Pago cancelado en Mercado Pago"
++            : "Pago rechazado en Mercado Pago",
++      },
++      release: unshipped || order.status === "cancelado",
++      confirm: false,
++    };
++  }
++
++  if (mpStatus === "refunded" || mpStatus === "charged_back") {
++    const unshipped = UNSHIPPED.has(order.status);
++    return {
++      action: "refund",
++      patch: {
++        ...base,
++        paymentStatus: "reembolsado",
++        status: unshipped ? "cancelado" : undefined,
++        note: "Pago reembolsado o contracargo en Mercado Pago",
++      },
++      release: unshipped,
++      confirm: false,
++    };
++  }
++
++  return {
++    action: "noop",
++    reason: `status=${mpStatus || "vacío"}`,
++    patch: null,
++    release: false,
++    confirm: false,
++  };
++}
+diff --git a/src/lib/store/payments.js b/src/lib/store/payments.js
+new file mode 100644
+index 0000000..9c9be35
+--- /dev/null
++++ b/src/lib/store/payments.js
+@@ -0,0 +1,221 @@
++import { centavosToUnitPrice, buildPaymentPatch, readOrderIdFromPayment } from "./payment-decision.js";
++import { createCheckoutPreference, getMpToken, getSiteUrl, mpCurrency, mpFetch } from "./mercadopago.js";
++import { sanitizeShipping, validateShippingMx } from "./mx-validate.js";
++import {
++  confirmProductSold,
++  createOrder,
++  getCart,
++  getOrder,
++  getProduct,
++  newId,
++  releaseProductIfHeldBy,
++  reserveProductForOrder,
++  saveOrderPayment,
++  setCart,
++  updateOrderStatus,
++} from "./services.js";
++
++function httpError(message, status) {
++  const error = new Error(message);
++  error.status = status;
++  return error;
++}
++
++export async function createPreferenceForOrder({ order, payer, req }) {
++  const origin = getSiteUrl(req);
++  const currency = mpCurrency();
++  const items = (order.items || []).map((item) => ({
++    id: String(item.productId || "pieza"),
++    title: `Oro Lozano · ${item.name || "Pieza"}`.slice(0, 120),
++    description: "Pieza única de oro o plata",
++    quantity: 1,
++    unit_price: centavosToUnitPrice(item.price),
++    currency_id: currency,
++  }));
++  if (!items.length) throw httpError("El pedido no tiene piezas", 400);
++  if (items.some((item) => !(item.unit_price > 0))) {
++    throw httpError("El pedido tiene un precio inválido", 400);
++  }
++
++  return createCheckoutPreference({
++    items,
++    payer: {
++      email: payer?.email || undefined,
++      name: payer?.name || undefined,
++    },
++    external_reference: String(order.id),
++    metadata: {
++      order_id: String(order.id),
++      user_id: String(order.userId || payer?.id || ""),
++    },
++    back_urls: {
++      success: `${origin}/pago/exito`,
++      failure: `${origin}/pago/fallo`,
++      pending: `${origin}/pago/pendiente`,
++    },
++    auto_return: "approved",
++    notification_url: `${origin}/api/mercadopago/webhook`,
++    payment_methods: { installments: 1 },
++  });
++}
++
++export async function placeOrderAndPreference({ user, shipping, req }) {
++  if (!getMpToken()) {
++    throw httpError("Pagos en línea no configurados. Falta MERCADO_PAGO_ACCESS_TOKEN", 503);
++  }
++  const clean = sanitizeShipping(shipping);
++  const shipError = validateShippingMx(clean);
++  if (shipError) throw httpError(shipError, 400);
++
++  const cart = await getCart(user.id);
++  if (!cart.items?.length) throw httpError("El carrito está vacío", 400);
++
++  const lines = [];
++  let total = 0;
++  for (const item of cart.items) {
++    const product = await getProduct(item.productId);
++    if (!product || product.stock < 1 || product.sold || !product.active || product.reservedOrderId) {
++      throw httpError(`Pieza no disponible: ${product?.name || "del carrito"}`, 400);
++    }
++    lines.push({
++      productId: product.id,
++      name: product.name,
++      price: Number(product.price) || 0,
++      quantity: 1,
++      certificateUuid: product.certificate?.uuid || null,
++      serial: product.certificate?.serial || null,
++    });
++    total += Number(product.price) || 0;
++  }
++
++  const orderId = newId("ord");
++  const reserved = [];
++  let order = null;
++  try {
++    for (const line of lines) {
++      const held = await reserveProductForOrder(line.productId, orderId);
++      if (!held) throw httpError(`Pieza no disponible: ${line.name}`, 409);
++      reserved.push(line.productId);
++    }
++    order = await createOrder({
++      id: orderId,
++      userId: user.id,
++      items: lines,
++      total,
++      shippingName: clean.fullName,
++      shippingCity: clean.city,
++      shipping: clean,
++      paymentStatus: "pendiente",
++      note: "Pedido registrado. Pago pendiente en Mercado Pago",
++    });
++    const preference = await createPreferenceForOrder({ order, payer: user, req });
++    const saved = await saveOrderPayment(order.id, {
++      mpPreferenceId: preference.id,
++      paymentStatus: "pendiente",
++    });
++    try {
++      await setCart(user.id, []);
++    } catch (cartError) {
++      console.error("No se pudo vaciar el carrito", cartError);
++    }
++    return { order: saved || order, preference };
++  } catch (error) {
++    if (order) {
++      try {
++        await updateOrderStatus(order.id, "cancelado", "No se pudo abrir el cobro en Mercado Pago");
++      } catch (cancelError) {
++        console.error("rollback pedido", cancelError);
++        for (const id of reserved) {
++          try {
++            await releaseProductIfHeldBy(id, orderId);
++          } catch (releaseError) {
++            console.error("rollback pieza", releaseError);
++          }
++        }
++      }
++    } else {
++      for (const id of reserved) {
++        try {
++          await releaseProductIfHeldBy(id, orderId);
++        } catch (releaseError) {
++          console.error("rollback pieza", releaseError);
++        }
++      }
++    }
++    throw error;
++  }
++}
++
++export async function reopenOrderPreference({ order, payer, req }) {
++  if (!getMpToken()) {
++    throw httpError("Pagos en línea no configurados. Falta MERCADO_PAGO_ACCESS_TOKEN", 503);
++  }
++  if (order.paymentStatus === "pagado") throw httpError("Este pedido ya está pagado", 400);
++  if (order.status === "cancelado") {
++    throw httpError("El pedido está cancelado. Vuelve a armar el carrito.", 400);
++  }
++  if (!["recibido", "confirmado"].includes(order.status)) {
++    throw httpError("Este pedido ya no se puede pagar en línea", 400);
++  }
++  for (const item of order.items || []) {
++    const product = await getProduct(item.productId);
++    if (product?.reservedOrderId === order.id && !product.sold) continue;
++    const reserved = await reserveProductForOrder(item.productId, order.id);
++    if (!reserved) throw httpError(`Pieza no disponible: ${item.name || "del pedido"}`, 409);
++  }
++  const preference = await createPreferenceForOrder({ order, payer, req });
++  const saved = await saveOrderPayment(order.id, {
++    mpPreferenceId: preference.id,
++    paymentStatus: "pendiente",
++  });
++  return { order: saved || order, preference };
++}
++
++export async function applyMercadoPagoPayment(payment) {
++  const orderId = readOrderIdFromPayment(payment);
++  if (!orderId) return { ok: false, reason: "sin external_reference" };
++  const order = await getOrder(orderId);
++  if (!order) return { ok: false, reason: "pedido no encontrado" };
++
++  const decision = buildPaymentPatch(order, payment);
++  if (decision.action === "noop" || !decision.patch) {
++    return { ok: true, reason: decision.reason || "sin cambios", orderId };
++  }
++
++  let conflict = false;
++  if (decision.confirm) {
++    for (const item of order.items || []) {
++      if (!item.productId) continue;
++      const result = await confirmProductSold(item.productId, order.id);
++      if (!result.ok) conflict = true;
++    }
++    if (conflict) {
++      decision.patch.status = undefined;
++      decision.patch.allowReopen = false;
++      decision.patch.note =
++        "Pago aprobado, pero la pieza ya no estaba disponible. Hay que revisarlo en Mercado Pago.";
++    }
++  }
++
++  const updated = await saveOrderPayment(order.id, decision.patch);
++  if (decision.release) {
++    for (const item of order.items || []) {
++      if (item.productId) await releaseProductIfHeldBy(item.productId, order.id);
++    }
++  }
++
++  console.info("MP payment", payment?.id, payment?.status, orderId, decision.action);
++  return {
++    ok: true,
++    reason: conflict ? "pagado_sin_pieza" : decision.action,
++    orderId,
++    paymentStatus: updated?.paymentStatus || decision.patch.paymentStatus,
++    conflict,
++  };
++}
++
++export async function fetchAndApplyPayment(paymentId) {
++  const payment = await mpFetch(`/v1/payments/${paymentId}`);
++  const result = await applyMercadoPagoPayment(payment);
++  return { payment, result };
++}
+diff --git a/src/lib/store/services.js b/src/lib/store/services.js
+index 173d7fa..f368ab3 100644
+--- a/src/lib/store/services.js
++++ b/src/lib/store/services.js
+@@ -1,12 +1,19 @@
+ import crypto from "node:crypto";
+-import { getAdminClient, publicImageUrl } from "./supabase";
+-import { hashPassword, verifyPassword, generateOtp } from "./password";
+-import { sendPasswordOtpEmail } from "./mail";
++import { getAdminClient, publicImageUrl } from "./supabase.js";
++import { hashPassword, verifyPassword, generateOtp } from "./password.js";
++import { sendPasswordOtpEmail } from "./mail.js";
++import { assertStatusTransition } from "./order-status.js";
++import { normalizeSpotMap } from "./mx-validate.js";
++import { reservationIsStale } from "./payment-decision.js";
+ 
+ function uid(prefix = "id") {
+   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+ }
+ 
++export function newId(prefix = "id") {
++  return uid(prefix);
++}
++
+ export function newUuid() {
+   return crypto.randomUUID();
+ }
+@@ -55,6 +62,8 @@ function mapProduct(row) {
+     stones: row.stones || "none",
+     stonesNote: row.stones_note || "",
+     certificate: row.certificate || null,
++    reservedOrderId: row.reserved_order_id || null,
++    reservedAt: row.reserved_at || null,
+     createdAt: row.created_at,
+   };
+ }
+@@ -71,6 +80,12 @@ function mapOrder(row) {
+     shippingName: row.shipping_name || "",
+     shippingCity: row.shipping_city || "",
+     shipping: row.shipping || {},
++    paymentStatus: row.payment_status || null,
++    mpPreferenceId: row.mp_preference_id || null,
++    mpPaymentId: row.mp_payment_id || null,
++    mpStatus: row.mp_status || null,
++    mpStatusDetail: row.mp_status_detail || null,
++    paidAt: row.paid_at || null,
+     createdAt: row.created_at,
+     updatedAt: row.updated_at,
+   };
+@@ -197,7 +212,9 @@ export async function updateUser(id, patch) {
+ 
+ export async function listProducts(opts = {}) {
+   let q = sb().from("products").select("*").order("created_at", { ascending: false });
+-  if (!opts.includeHidden) q = q.eq("active", true).eq("sold", false);
++  if (!opts.includeHidden) {
++    q = q.eq("active", true).eq("sold", false).is("reserved_order_id", null);
++  }
+   const { data, error } = await q;
+   if (error) throw new Error(error.message);
+   return (data || []).map(mapProduct);
+@@ -296,6 +313,8 @@ export async function updateProduct(id, patch) {
+   if (patch.featured !== undefined) update.featured = Boolean(patch.featured);
+   if (patch.active !== undefined) update.active = Boolean(patch.active);
+   if (patch.sold !== undefined) update.sold = Boolean(patch.sold);
++  if (patch.reservedOrderId !== undefined) update.reserved_order_id = patch.reservedOrderId;
++  if (patch.reservedAt !== undefined) update.reserved_at = patch.reservedAt;
+   if (patch.priceBreakdown !== undefined) update.price_breakdown = patch.priceBreakdown;
+   if (patch.certificate) {
+     const prev = current.certificate || {};
+@@ -364,7 +383,7 @@ export async function listOrders(userId) {
+ export async function createOrder(order) {
+   const status = order.status || "recibido";
+   const row = {
+-    id: uid("ord"),
++    id: order.id || uid("ord"),
+     user_id: order.userId,
+     items: order.items || [],
+     total: Number(order.total || 0),
+@@ -373,12 +392,18 @@ export async function createOrder(order) {
+       {
+         status,
+         at: new Date().toISOString(),
+-        note: "Pedido registrado",
++        note: order.note || "Pedido registrado",
+       },
+     ],
+     shipping_name: order.shippingName || "",
+     shipping_city: order.shippingCity || "",
+     shipping: order.shipping || {},
++    payment_status: order.paymentStatus || "pendiente",
++    mp_preference_id: order.mpPreferenceId || null,
++    mp_payment_id: order.mpPaymentId || null,
++    mp_status: order.mpStatus || null,
++    mp_status_detail: order.mpStatusDetail || null,
++    paid_at: order.paidAt || null,
+     created_at: new Date().toISOString(),
+     updated_at: new Date().toISOString(),
+   };
+@@ -387,21 +412,26 @@ export async function createOrder(order) {
+   return mapOrder(data);
+ }
+ 
+-export async function updateOrderStatus(orderId, status, note = "") {
+-  const { data: current, error: readErr } = await sb()
+-    .from("orders")
+-    .select("*")
+-    .eq("id", orderId)
+-    .maybeSingle();
+-  if (readErr) throw new Error(readErr.message);
++export async function getOrder(id) {
++  const { data, error } = await sb().from("orders").select("*").eq("id", id).maybeSingle();
++  if (error) throw new Error(error.message);
++  return mapOrder(data);
++}
++
++export async function getProductsByIds(ids) {
++  const unique = [...new Set((ids || []).filter(Boolean))];
++  if (!unique.length) return [];
++  const { data, error } = await sb().from("products").select("*").in("id", unique);
++  if (error) throw new Error(error.message);
++  return (data || []).map(mapProduct);
++}
++
++export async function updateOrderStatus(orderId, status, note = "", opts = {}) {
++  const current = await getOrder(orderId);
+   if (!current) return null;
+-  if (current.status === "cancelado" && status !== "cancelado") {
+-    throw new Error("Un pedido cancelado no puede cambiar de estatus");
+-  }
+-  if (current.status === "finalizado" && status !== "finalizado") {
+-    throw new Error("Un pedido finalizado no puede cambiar de estatus");
+-  }
+-  const history = Array.isArray(current.status_history) ? [...current.status_history] : [];
++  if (current.status === status) return current;
++  assertStatusTransition(current.status, status, opts);
++  const history = Array.isArray(current.statusHistory) ? [...current.statusHistory] : [];
+   history.push({
+     status,
+     note: note || "",
+@@ -418,17 +448,50 @@ export async function updateOrderStatus(orderId, status, note = "") {
+     .select("*")
+     .single();
+   if (error) throw new Error(error.message);
+-  // Al cancelar, liberar piezas automáticamente
+   if (status === "cancelado") {
+     for (const item of data.items || []) {
+-      if (item.productId) {
+-        await releaseProduct(item.productId);
+-      }
++      if (item.productId) await releaseProductIfHeldBy(item.productId, orderId);
+     }
+   }
+   return mapOrder(data);
+ }
+ 
++export async function saveOrderPayment(orderId, patch) {
++  const current = await getOrder(orderId);
++  if (!current) return null;
++  const update = { updated_at: new Date().toISOString() };
++  if (patch.paymentStatus) update.payment_status = patch.paymentStatus;
++  if (patch.mpPreferenceId !== undefined) update.mp_preference_id = patch.mpPreferenceId;
++  if (patch.mpPaymentId !== undefined) update.mp_payment_id = patch.mpPaymentId;
++  if (patch.mpStatus !== undefined) update.mp_status = patch.mpStatus;
++  if (patch.mpStatusDetail !== undefined) update.mp_status_detail = patch.mpStatusDetail;
++  if (patch.paidAt !== undefined) update.paid_at = patch.paidAt;
++
++  const history = Array.isArray(current.statusHistory) ? [...current.statusHistory] : [];
++  if (patch.status && patch.status !== current.status) {
++    assertStatusTransition(current.status, patch.status, { allowReopen: Boolean(patch.allowReopen) });
++    history.push({
++      status: patch.status,
++      note: patch.note || "",
++      at: new Date().toISOString(),
++    });
++    update.status = patch.status;
++    update.status_history = history;
++  } else if (patch.note) {
++    history.push({
++      status: current.status,
++      note: patch.note,
++      at: new Date().toISOString(),
++      paymentStatus: patch.paymentStatus || current.paymentStatus,
++    });
++    update.status_history = history;
++  }
++
++  const { data, error } = await sb().from("orders").update(update).eq("id", orderId).select("*").single();
++  if (error) throw new Error(error.message);
++  return mapOrder(data);
++}
++
+ /* ---------- sessions ---------- */
+ 
+ export async function createSession(userId) {
+@@ -513,8 +576,8 @@ export async function resetPasswordWithOtp({ email, otp, newPassword }) {
+   if (!email || !otp || !newPassword) {
+     throw new Error("Correo, OTP y nueva contraseña son requeridos");
+   }
+-  if (String(newPassword).length < 4) {
+-    throw new Error("La contraseña debe tener al menos 4 caracteres");
++  if (String(newPassword).length < 6) {
++    throw new Error("La contraseña debe tener al menos 6 caracteres");
+   }
+   const normalized = String(email).trim().toLowerCase();
+   const { data: rows, error } = await sb()
+@@ -590,21 +653,38 @@ function mapAdminData(row) {
+   return {
+     id: row.id,
+     categories: row.categories || DEFAULT_ADMIN_DATA.categories,
+-    goldSpotByKarat: row.gold_spot_by_karat || {},
++    goldSpotByKarat: normalizeSpotMap(row.gold_spot_by_karat || {}),
+     marginPercent: Number(row.margin_percent ?? 35),
+     ivaPercent: Number(row.iva_percent ?? 16),
+     updatedAt: row.updated_at,
+   };
+ }
+ 
++function clampPercent(value, fallback, max) {
++  if (value == null || value === "") return fallback;
++  const n = Number(value);
++  if (!Number.isFinite(n)) return fallback;
++  return Math.min(max, Math.max(0, Math.round(n * 100) / 100));
++}
++
+ export async function updateAdminData(patch) {
+   const current = await getAdminData();
+   const row = {
+     id: "main",
+     categories: patch.categories ?? current.categories,
+-    gold_spot_by_karat: patch.goldSpotByKarat ?? current.goldSpotByKarat,
+-    margin_percent: patch.marginPercent ?? current.marginPercent,
+-    iva_percent: patch.ivaPercent ?? current.ivaPercent,
++    gold_spot_by_karat: normalizeSpotMap(
++      patch.goldSpotByKarat !== undefined ? patch.goldSpotByKarat : current.goldSpotByKarat,
++    ),
++    margin_percent: clampPercent(
++      patch.marginPercent !== undefined ? patch.marginPercent : current.marginPercent,
++      current.marginPercent,
++      500,
++    ),
++    iva_percent: clampPercent(
++      patch.ivaPercent !== undefined ? patch.ivaPercent : current.ivaPercent,
++      current.ivaPercent,
++      100,
++    ),
+     updated_at: new Date().toISOString(),
+   };
+   const { data, error } = await sb().from("admin_data").upsert(row, { onConflict: "id" }).select("*").single();
+@@ -613,13 +693,107 @@ export async function updateAdminData(patch) {
+ }
+ 
+ 
+-export async function markProductSold(id) {
+-  return updateProduct(id, { active: false, stock: 0, sold: true });
++export async function markProductSold(id, orderId) {
++  const patch = { active: false, stock: 0, sold: true };
++  if (orderId) patch.reservedOrderId = orderId;
++  return updateProduct(id, patch);
+ }
+ 
+ /** Libera una pieza vendida/reservada para volver al catálogo */
+ export async function releaseProduct(id) {
+-  return updateProduct(id, { active: true, stock: 1, sold: false });
++  return updateProduct(id, {
++    active: true,
++    stock: 1,
++    sold: false,
++    reservedOrderId: null,
++    reservedAt: null,
++  });
++}
++
++/** No suelta la pieza si otro pedido ya la reservó o la compró. */
++export async function releaseProductIfHeldBy(productId, orderId) {
++  const product = await getProduct(productId);
++  if (!product) return null;
++  if (product.reservedOrderId && product.reservedOrderId !== orderId) return product;
++  return releaseProduct(productId);
++}
++
++const soldPatch = (orderId) => ({
++  sold: true,
++  stock: 0,
++  active: false,
++  reserved_order_id: orderId,
++});
++
++/** Marca la pieza vendida solo si sigue libre o ya es de este pedido. */
++export async function confirmProductSold(productId, orderId) {
++  const held = await sb()
++    .from("products")
++    .update(soldPatch(orderId))
++    .eq("id", productId)
++    .eq("reserved_order_id", orderId)
++    .select("*");
++  if (held.error) throw new Error(held.error.message);
++  if (held.data?.length) return { ok: true, product: mapProduct(held.data[0]) };
++
++  const free = await sb()
++    .from("products")
++    .update(soldPatch(orderId))
++    .eq("id", productId)
++    .eq("sold", false)
++    .is("reserved_order_id", null)
++    .select("*");
++  if (free.error) throw new Error(free.error.message);
++  if (free.data?.length) return { ok: true, product: mapProduct(free.data[0]) };
++  return { ok: false, reason: "no disponible" };
++}
++
++async function tryReserve(productId, orderId) {
++  const now = new Date().toISOString();
++  const { data, error } = await sb()
++    .from("products")
++    .update({
++      stock: 0,
++      active: false,
++      sold: false,
++      reserved_order_id: orderId,
++      reserved_at: now,
++    })
++    .eq("id", productId)
++    .eq("sold", false)
++    .eq("active", true)
++    .is("reserved_order_id", null)
++    .gte("stock", 1)
++    .select("*");
++  if (error) throw new Error(error.message);
++  return data?.length ? mapProduct(data[0]) : null;
++}
++
++/** Reserva atómica. Si la reserva anterior venció sin pago, la libera y reintenta una vez. */
++export async function reserveProductForOrder(productId, orderId) {
++  const first = await tryReserve(productId, orderId);
++  if (first) return first;
++
++  const current = await getProduct(productId);
++  if (!current || current.sold) return null;
++  if (current.reservedOrderId === orderId) return current;
++  if (!current.reservedOrderId) return null;
++
++  const holder = await getOrder(current.reservedOrderId);
++  if (!reservationIsStale(current, holder)) return null;
++
++  await releaseProductIfHeldBy(productId, current.reservedOrderId);
++  if (
++    holder &&
++    holder.paymentStatus !== "pagado" &&
++    holder.status !== "cancelado" &&
++    holder.status !== "finalizado" &&
++    holder.status !== "enviado" &&
++    holder.status !== "en_envio"
++  ) {
++    await updateOrderStatus(holder.id, "cancelado", "Reserva vencida sin pago confirmado");
++  }
++  return tryReserve(productId, orderId);
+ }
+ 
+ export async function updateOrderShipping(orderId, shipping, shippingName, shippingCity) {
+@@ -630,15 +804,16 @@ export async function updateOrderShipping(orderId, shipping, shippingName, shipp
+     .maybeSingle();
+   if (readErr) throw new Error(readErr.message);
+   if (!current) return null;
+-  if (["cancelado", "finalizado", "enviado"].includes(current.status)) {
++  if (!["recibido", "confirmado"].includes(current.status)) {
+     throw new Error("Ya no se pueden editar los datos de envío de este pedido");
+   }
++  const merged = { ...(current.shipping || {}), ...(shipping || {}) };
+   const { data, error } = await sb()
+     .from("orders")
+     .update({
+-      shipping: shipping || current.shipping || {},
+-      shipping_name: shippingName || shipping?.fullName || current.shipping_name || "",
+-      shipping_city: shippingCity || shipping?.city || current.shipping_city || "",
++      shipping: merged,
++      shipping_name: shippingName || merged.fullName || current.shipping_name || "",
++      shipping_city: shippingCity || merged.city || current.shipping_city || "",
+       updated_at: new Date().toISOString(),
+     })
+     .eq("id", orderId)
+diff --git a/src/pages/admin/index.js b/src/pages/admin/index.js
+index aad38f2..4d90d98 100644
+--- a/src/pages/admin/index.js
++++ b/src/pages/admin/index.js
+@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
+ import { CertificateBadge } from "@/components/CertificateBadge";
+ import { PageShell, useAuth } from "@/components/SiteChrome";
+ import { Toast } from "@/components/Toast";
+-import { ORDER_STATUSES, statusLabel, nextStatuses } from "@/lib/store/order-status";
+-import { calculateSalePrice, formatMxnFromCentavos, KARAT_OPTIONS } from "@/lib/store/mx-validate";
++import { ORDER_STATUSES, statusLabel, nextStatuses, paymentLabel, canAdvanceFulfillment } from "@/lib/store/order-status";
++import { calculateSalePrice, formatMxnFromCentavos, KARAT_OPTIONS, normalizeKaratKey } from "@/lib/store/mx-validate";
+ import { api, formatMxn } from "@/lib/store/client";
+ 
+ const emptyForm = {
+@@ -45,7 +45,7 @@ export default function Admin() {
+   ];
+ 
+   const pricePreview = useMemo(() => {
+-    const karat = form.purity || "18K";
++    const karat = normalizeKaratKey(form.purity || "18K");
+     const spot = Number(settings?.goldSpotByKarat?.[karat] || 0);
+     if (!spot || !form.weightGrams) return null;
+     return calculateSalePrice({
+@@ -82,8 +82,13 @@ export default function Admin() {
+   }
+ 
+   function openEdit(p) {
+-    if (p.sold) {
+-      showToast("Pieza vendida: no se puede editar hasta liberarla (pedido cancelado)", "error");
++    if (p.sold || p.reservedOrderId) {
++      showToast(
++        p.sold
++          ? "Pieza vendida: no se puede editar hasta liberarla (pedido cancelado)"
++          : "Pieza reservada por un pago en curso",
++        "error",
++      );
+       return;
+     }
+     const imgs = [...(p.images || [])];
+@@ -241,7 +246,7 @@ export default function Admin() {
+                     <div
+                       key={p.id}
+                       className={`rounded-[var(--radius-xl)] border border-border bg-surface p-4 ${
+-                        p.sold ? "opacity-80" : ""
++                        p.sold || p.reservedOrderId ? "opacity-80" : ""
+                       }`}
+                     >
+                       <div className="relative aspect-square overflow-hidden rounded-[var(--radius-lg)] bg-elevated">
+@@ -250,9 +255,9 @@ export default function Admin() {
+                         ) : (
+                           <div className="flex size-full items-center justify-center text-subtle">Sin imagen</div>
+                         )}
+-                        {p.sold ? (
++                        {p.sold || p.reservedOrderId ? (
+                           <span className="absolute left-2 top-2 rounded-full bg-gold px-2 py-1 text-[10px] uppercase tracking-wide text-bg">
+-                            Vendido
++                            {p.sold ? "Vendido" : "Reservada"}
+                           </span>
+                         ) : null}
+                       </div>
+@@ -267,6 +272,13 @@ export default function Admin() {
+                         <CertificateBadge
+                           hasCertificate={hasCert}
+                           onClick={() => {
++                            if (p.sold || p.reservedOrderId) {
++                              showToast(
++                                p.sold ? "Pieza vendida: el certificado queda en solo lectura" : "Pieza reservada por un pago en curso",
++                                "error",
++                              );
++                              return;
++                            }
+                             setCertModal(p);
+                             setCertForm({
+                               weightGrams: String(p.certificate?.weightGrams ?? p.weightGrams ?? ""),
+@@ -281,9 +293,9 @@ export default function Admin() {
+                         />
+                       </div>
+                       <div className="mt-3 flex flex-wrap gap-2">
+-                        {p.sold ? (
++                        {p.sold || p.reservedOrderId ? (
+                           <span className="inline-flex h-9 items-center rounded-full border border-gold/40 bg-gold/10 px-3 text-xs uppercase tracking-wide text-gold">
+-                            Vendido — solo lectura
++                            {p.sold ? "Vendido — solo lectura" : "Reservada — pago en curso"}
+                           </span>
+                         ) : (
+                           <button
+@@ -324,6 +336,15 @@ export default function Admin() {
+                             {o.shippingName} · {o.shippingCity}
+                           </p>
+                           <p className="mt-2 text-xs text-gold-strong">{statusLabel(o.status || "recibido")}</p>
++                          <p className="text-xs text-muted">{paymentLabel(o.paymentStatus)}</p>
++                          {o.mpPaymentId ? (
++                            <p className="text-[11px] text-subtle">MP {o.mpPaymentId}</p>
++                          ) : null}
++                          {(o.items || []).map((item) => (
++                            <p key={item.productId} className="text-sm text-muted">
++                              {item.name}
++                            </p>
++                          ))}
+                         </div>
+                         <div className="flex flex-col items-end gap-2">
+                           {o.status === "cancelado" ? (
+@@ -362,13 +383,24 @@ export default function Admin() {
+                                 }
+                               }}
+                             >
+-                              {nextStatuses(o.status || "recibido").map((s) => (
++                              {(canAdvanceFulfillment(o)
++                                ? nextStatuses(o.status || "recibido")
++                                : [
++                                    ORDER_STATUSES.find((s) => s.id === (o.status || "recibido")),
++                                    ORDER_STATUSES.find((s) => s.id === "cancelado"),
++                                  ].filter(Boolean)
++                              ).map((s) => (
+                                 <option key={s.id} value={s.id}>
+                                   {s.step ? `${s.step}. ` : ""}{s.label}
+                                 </option>
+                               ))}
+                             </select>
+                           )}
++                          {!canAdvanceFulfillment(o) && o.status !== "cancelado" ? (
++                            <p className="max-w-[220px] text-right text-[11px] text-subtle">
++                              El despacho se habilita cuando el pago queda aprobado.
++                            </p>
++                          ) : null}
+                         </div>
+                       </div>
+                     </div>
+@@ -603,17 +635,13 @@ function AdminSettingsPanel({ settings, products, onSaved, onError }) {
+     setIva(settings.ivaPercent ?? 16);
+   }, [settings]);
+ 
+-  const usedKarats = Array.from(
+-    new Set(
+-      (products || [])
+-        .filter((p) => !p.sold)
+-        .map((p) => {
+-          const k = String(p.purity || p.karat || "").toUpperCase();
+-          return k.endsWith("K") ? k : k ? `${k}K` : null;
+-        })
+-        .filter(Boolean),
+-    ),
+-  ).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
++  const usedKarats = KARAT_OPTIONS;
++  const karatsInCatalog = new Set(
++    (products || []).map((p) => {
++      const k = String(p.purity || p.karat || "").toUpperCase();
++      return k.endsWith("K") ? k : k ? `${k}K` : "";
++    }),
++  );
+ 
+   async function save() {
+     setBusy(true);
+@@ -666,11 +694,14 @@ function AdminSettingsPanel({ settings, products, onSaved, onError }) {
+       </div>
+       <div className="rounded-[var(--radius-xl)] border border-border bg-surface p-6">
+         <h2 className="font-display text-2xl">Precio spot oro (MXN / g)</h2>
+-        <p className="mt-2 text-sm text-muted">Kilatajes de piezas disponibles. Fórmula: spot × peso × (1+margen) × (1+IVA).</p>
+-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+-          {(usedKarats.length ? usedKarats : ["10K", "14K", "18K", "24K"]).map((k) => (
++        <p className="mt-2 text-sm text-muted">
++          Del 1K al 24K, para poder cotizar antes de publicar la pieza. Fórmula: spot × peso × (1+margen) × (1+IVA).
++        </p>
++        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++          {usedKarats.map((k) => (
+             <label key={k} className="block text-xs text-subtle">
+               Spot {k}
++              {karatsInCatalog.has(k) ? " · en catálogo" : ""}
+               <input
+                 className="mt-1 h-11 w-full rounded-md border border-border bg-bg px-3 tabular-nums"
+                 value={spot[k] ?? ""}
+diff --git a/src/pages/api/admin/orders/[id].js b/src/pages/api/admin/orders/[id].js
+index 78a5f40..3bdc38f 100644
+--- a/src/pages/api/admin/orders/[id].js
++++ b/src/pages/api/admin/orders/[id].js
+@@ -1,11 +1,11 @@
+ import { currentUserFromRequest, json } from "@/lib/store/http";
+ import {
+   updateOrderStatus,
+-  releaseProduct,
++  releaseProductIfHeldBy,
+   updateOrderShipping,
+-  listOrders,
++  getOrder,
+ } from "@/lib/store/services";
+-import { ORDER_STATUSES } from "@/lib/store/order-status";
++import { ORDER_STATUSES, canAdvanceFulfillment } from "@/lib/store/order-status";
+ 
+ const ALLOWED = new Set(ORDER_STATUSES.map((s) => s.id));
+ 
+@@ -19,14 +19,16 @@ export default async function handler(req, res) {
+ 
+     // Liberar productos de un pedido cancelado
+     if (body.action === "release_products") {
+-      const orders = await listOrders();
+-      const order = orders.find((o) => o.id === id);
++      const order = await getOrder(id);
+       if (!order) return json(res, { error: "Pedido no encontrado" }, 404);
+       if (order.status !== "cancelado") {
+         return json(res, { error: "Solo se liberan piezas de pedidos cancelados" }, 400);
+       }
++      if (order.paymentStatus === "pagado") {
++        return json(res, { error: "El pago sigue aprobado. Reembolsa en Mercado Pago antes de liberar." }, 400);
++      }
+       for (const item of order.items || []) {
+-        if (item.productId) await releaseProduct(item.productId);
++        if (item.productId) await releaseProductIfHeldBy(item.productId, order.id);
+       }
+       return json(res, { ok: true, message: "Piezas liberadas al catálogo" });
+     }
+@@ -52,6 +54,11 @@ export default async function handler(req, res) {
+     if (!status || !ALLOWED.has(status)) {
+       return json(res, { error: "Estatus inválido" }, 400);
+     }
++    const current = await getOrder(id);
++    if (!current) return json(res, { error: "Pedido no encontrado" }, 404);
++    if (status !== current.status && status !== "cancelado" && !canAdvanceFulfillment(current)) {
++      return json(res, { error: "El pedido todavía no tiene un pago aprobado" }, 400);
++    }
+     try {
+       const order = await updateOrderStatus(id, status, note);
+       if (!order) return json(res, { error: "Pedido no encontrado" }, 404);
+diff --git a/src/pages/api/admin/products/[id].js b/src/pages/api/admin/products/[id].js
+index 525fe81..4f7fbb4 100644
+--- a/src/pages/api/admin/products/[id].js
++++ b/src/pages/api/admin/products/[id].js
+@@ -1,5 +1,5 @@
+ import { currentUserFromRequest, json } from "@/lib/store/http";
+-import { deleteProduct, updateProduct } from "@/lib/store/services";
++import { getProduct, softDeleteProduct, updateProduct } from "@/lib/store/services";
+ 
+ export default async function handler(req, res) {
+   const user = await currentUserFromRequest(req);
+@@ -7,13 +7,28 @@ export default async function handler(req, res) {
+   const { id } = req.query;
+ 
+   if (req.method === "PUT") {
+-    const product = await updateProduct(id, req.body || {});
+-    if (!product) return json(res, { error: "No encontrado" }, 404);
++    const current = await getProduct(id);
++    if (!current) return json(res, { error: "No encontrado" }, 404);
++    if (current.sold || current.reservedOrderId) {
++      return json(res, { error: "Pieza vendida o reservada: solo lectura hasta liberarla" }, 409);
++    }
++    const body = { ...(req.body || {}) };
++    delete body.sold;
++    delete body.stock;
++    delete body.reservedOrderId;
++    delete body.reservedAt;
++    if (body.active !== false) body.stock = 1;
++    const product = await updateProduct(id, body);
+     return json(res, { product });
+   }
+ 
+   if (req.method === "DELETE") {
+-    await deleteProduct(id);
++    const current = await getProduct(id);
++    if (!current) return json(res, { error: "No encontrado" }, 404);
++    if (current.sold || current.reservedOrderId) {
++      return json(res, { error: "No se puede ocultar una pieza vendida o reservada" }, 409);
++    }
++    await softDeleteProduct(id);
+     return json(res, { ok: true });
+   }
+ 
+diff --git a/src/pages/api/cart.js b/src/pages/api/cart.js
+index 8ac2d1b..cd5f178 100644
+--- a/src/pages/api/cart.js
++++ b/src/pages/api/cart.js
+@@ -1,5 +1,9 @@
+ import { currentUserFromRequest, json } from "@/lib/store/http";
+-import { getCart, getProduct, listProducts, setCart } from "@/lib/store/services";
++import { getCart, getProduct, getProductsByIds, setCart } from "@/lib/store/services";
++
++function unavailable(product) {
++  return !product || product.stock < 1 || product.sold || !product.active || product.reservedOrderId;
++}
+ 
+ export default async function handler(req, res) {
+   const user = await currentUserFromRequest(req);
+@@ -7,7 +11,7 @@ export default async function handler(req, res) {
+ 
+   if (req.method === "GET") {
+     const cart = await getCart(user.id);
+-    const products = await listProducts({ includeHidden: true });
++    const products = await getProductsByIds((cart.items || []).map((item) => item.productId));
+     return json(res, { cart, products });
+   }
+ 
+@@ -18,7 +22,7 @@ export default async function handler(req, res) {
+     const productId = req.body?.productId;
+     if (!productId) return json(res, { error: "Producto requerido" }, 400);
+     const product = await getProduct(productId);
+-    if (!product || product.stock < 1 || product.sold || !product.active) {
++    if (unavailable(product)) {
+       return json(res, { error: "Pieza no disponible" }, 404);
+     }
+     const cart = await getCart(user.id);
+@@ -50,7 +54,7 @@ export default async function handler(req, res) {
+       } else {
+         // Si no estaba, añadirlo (mismo efecto que POST)
+         const product = await getProduct(productId);
+-        if (!product || product.stock < 1 || product.sold || !product.active) {
++        if (unavailable(product)) {
+           return json(res, { error: "Pieza no disponible" }, 404);
+         }
+         items = [...cart.items, { productId, quantity: 1 }];
+diff --git a/src/pages/api/mercadopago/checkout.js b/src/pages/api/mercadopago/checkout.js
+new file mode 100644
+index 0000000..549fe7a
+--- /dev/null
++++ b/src/pages/api/mercadopago/checkout.js
+@@ -0,0 +1,29 @@
++import { currentUserFromRequest, json } from "@/lib/store/http";
++import { getOrder } from "@/lib/store/services";
++import { reopenOrderPreference } from "@/lib/store/payments";
++
++/** Nueva preferencia para un pedido propio que sigue pendiente de pago. */
++export default async function handler(req, res) {
++  if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
++  const user = await currentUserFromRequest(req);
++  if (!user) return json(res, { error: "Inicia sesión" }, 401);
++  if (user.role === "admin") return json(res, { error: "Usa una cuenta de cliente" }, 403);
++
++  const orderId = req.body?.orderId;
++  if (!orderId) return json(res, { error: "Pedido requerido" }, 400);
++  const order = await getOrder(String(orderId));
++  if (!order || order.userId !== user.id) return json(res, { error: "Pedido no encontrado" }, 404);
++
++  try {
++    const { order: saved, preference } = await reopenOrderPreference({ order, payer: user, req });
++    return json(res, {
++      order: saved,
++      id: preference.id,
++      init_point: preference.init_point,
++      sandbox_init_point: preference.sandbox_init_point,
++    });
++  } catch (error) {
++    console.error("MP checkout", error.detail || error);
++    return json(res, { error: error.message || "Error Mercado Pago" }, error.status || 500);
++  }
++}
+diff --git a/src/pages/api/mercadopago/sync.js b/src/pages/api/mercadopago/sync.js
+new file mode 100644
+index 0000000..18333b0
+--- /dev/null
++++ b/src/pages/api/mercadopago/sync.js
+@@ -0,0 +1,33 @@
++import { currentUserFromRequest, json } from "@/lib/store/http";
++import { mpFetch } from "@/lib/store/mercadopago";
++import { applyMercadoPagoPayment } from "@/lib/store/payments";
++import { readOrderIdFromPayment } from "@/lib/store/payment-decision";
++import { getOrder } from "@/lib/store/services";
++
++/**
++ * La página de retorno consulta el pago en Mercado Pago.
++ * El webhook sigue siendo la fuente de verdad; esto solo adelanta el mismo efecto.
++ */
++export default async function handler(req, res) {
++  if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
++  const user = await currentUserFromRequest(req);
++  if (!user) return json(res, { error: "Inicia sesión" }, 401);
++
++  const paymentId = req.body?.paymentId || req.body?.collectionId;
++  if (!paymentId) return json(res, { error: "Falta el id del pago" }, 400);
++
++  try {
++    const payment = await mpFetch(`/v1/payments/${paymentId}`);
++    const orderId = readOrderIdFromPayment(payment);
++    const existing = orderId ? await getOrder(orderId) : null;
++    if (!existing || (user.role !== "admin" && existing.userId !== user.id)) {
++      return json(res, { error: "Pedido no encontrado" }, 404);
++    }
++    const result = await applyMercadoPagoPayment(payment);
++    const order = await getOrder(orderId);
++    return json(res, { order, result, mpStatus: payment.status || null });
++  } catch (error) {
++    console.error("MP sync", error.detail || error);
++    return json(res, { error: error.message || "No se pudo consultar el pago" }, error.status || 500);
++  }
++}
+diff --git a/src/pages/api/mercadopago/webhook.js b/src/pages/api/mercadopago/webhook.js
+new file mode 100644
+index 0000000..57d2c3b
+--- /dev/null
++++ b/src/pages/api/mercadopago/webhook.js
+@@ -0,0 +1,32 @@
++import { json } from "@/lib/store/http";
++import { mpFetch, readWebhookNotification, verifyMercadoPagoWebhook } from "@/lib/store/mercadopago";
++import { applyMercadoPagoPayment } from "@/lib/store/payments";
++
++/**
++ * Webhook Mercado Pago, mismo contrato que NewWapifood:
++ * topic=payment + id, firma x-signature, consulta GET /v1/payments/:id.
++ * A diferencia de WapiFood, un error de base de datos responde 500 para que MP reintente.
++ * Firma inválida: 401. Aviso que no es un pago: 200.
++ */
++export default async function handler(req, res) {
++  if (req.method !== "POST" && req.method !== "GET") {
++    return json(res, { error: "Método no permitido" }, 405);
++  }
++
++  try {
++    const note = readWebhookNotification(req);
++    if (note.topic === "payment" && note.paymentId) {
++      const signature = verifyMercadoPagoWebhook(req, note.signatureId);
++      if (!signature.ok) {
++        return json(res, { status: "unauthorized", reason: signature.reason }, 401);
++      }
++      const payment = await mpFetch(`/v1/payments/${note.paymentId}`);
++      const result = await applyMercadoPagoPayment(payment);
++      return json(res, { status: "success", ...result });
++    }
++    return json(res, { status: "ignored", topic: note.topic, paymentId: note.paymentId || null });
++  } catch (error) {
++    console.error("MP webhook error", error);
++    return json(res, { status: "error", message: error.message || "Error" }, 500);
++  }
++}
+diff --git a/src/pages/api/orders.js b/src/pages/api/orders.js
+index 86352f0..effbe02 100644
+--- a/src/pages/api/orders.js
++++ b/src/pages/api/orders.js
+@@ -1,13 +1,7 @@
+ import { currentUserFromRequest, json } from "@/lib/store/http";
+-import {
+-  createOrder,
+-  getCart,
+-  getProduct,
+-  listOrders,
+-  setCart,
+-  markProductSold,
+-  updateOrderShipping,
+-} from "@/lib/store/services";
++import { sanitizeShipping, validateShippingMx } from "@/lib/store/mx-validate";
++import { placeOrderAndPreference } from "@/lib/store/payments";
++import { listOrders, updateOrderShipping } from "@/lib/store/services";
+ 
+ export default async function handler(req, res) {
+   const user = await currentUserFromRequest(req);
+@@ -22,69 +16,42 @@ export default async function handler(req, res) {
+     if (user.role === "admin") {
+       return json(res, { error: "Usa una cuenta de cliente" }, 403);
+     }
+-    const cart = await getCart(user.id);
+-    if (cart.items.length === 0) return json(res, { error: "El carrito está vacío" }, 400);
+-    const lines = [];
+-    let total = 0;
+-    for (const item of cart.items) {
+-      const product = await getProduct(item.productId);
+-      if (!product) continue;
+-      if (product.stock < 1 || product.sold) {
+-        return json(res, { error: `Pieza no disponible: ${product.name}` }, 400);
+-      }
+-      lines.push({
+-        productId: product.id,
+-        name: product.name,
+-        price: product.price,
+-        quantity: 1,
+-        certificateUuid: product.certificate?.uuid,
+-        serial: product.certificate?.serial,
+-      });
+-      total += product.price;
+-    }
+-    if (lines.length === 0) return json(res, { error: "No hay piezas válidas en el carrito" }, 400);
+-
+-    for (const line of lines) {
+-      await markProductSold(line.productId);
++    try {
++      const body = req.body || {};
++      const shipping = sanitizeShipping(body.shipping || {});
++      const { order, preference } = await placeOrderAndPreference({ user, shipping, req });
++      return json(res, {
++        order,
++        id: preference.id,
++        init_point: preference.init_point,
++        sandbox_init_point: preference.sandbox_init_point,
++      }, 201);
++    } catch (error) {
++      console.error("checkout", error.detail || error);
++      return json(res, { error: error.message || "No se pudo crear el pedido" }, error.status || 500);
+     }
+-
+-    const body = req.body || {};
+-    const shipping = body.shipping || {};
+-    const order = await createOrder({
+-      userId: user.id,
+-      items: lines,
+-      total,
+-      shippingName: body.shippingName || shipping.fullName || user.name,
+-      shippingCity: body.shippingCity || shipping.city || "",
+-      shipping,
+-    });
+-    await setCart(user.id, []);
+-    return json(res, { order }, 201);
+   }
+ 
+-  // Cliente actualiza envío de un pedido propio (aún editable)
+   if (req.method === "PATCH") {
+     if (user.role === "admin") {
+       return json(res, { error: "Usa el panel de atelier" }, 403);
+     }
+     const orderId = req.body?.orderId || req.body?.id;
+-    const shipping = req.body?.shipping;
+-    if (!orderId || !shipping) {
++    const shipping = sanitizeShipping(req.body?.shipping || {});
++    if (!orderId || !req.body?.shipping) {
+       return json(res, { error: "orderId y shipping son requeridos" }, 400);
+     }
+     const orders = await listOrders(user.id);
+-    const mine = orders.find((o) => o.id === orderId);
++    const mine = orders.find((order) => order.id === orderId);
+     if (!mine) return json(res, { error: "Pedido no encontrado" }, 404);
++    const merged = { ...(mine.shipping || {}), ...shipping };
++    const shipError = validateShippingMx(merged);
++    if (shipError) return json(res, { error: shipError }, 400);
+     try {
+-      const order = await updateOrderShipping(
+-        orderId,
+-        shipping,
+-        shipping.fullName,
+-        shipping.city,
+-      );
++      const order = await updateOrderShipping(orderId, merged, merged.fullName, merged.city);
+       return json(res, { order });
+-    } catch (e) {
+-      return json(res, { error: e.message }, 400);
++    } catch (error) {
++      return json(res, { error: error.message }, 400);
+     }
+   }
+ 
+diff --git a/src/pages/api/products/[id].js b/src/pages/api/products/[id].js
+index 68fe343..390b327 100644
+--- a/src/pages/api/products/[id].js
++++ b/src/pages/api/products/[id].js
+@@ -4,6 +4,8 @@ import { getProduct } from "@/lib/store/services";
+ export default async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+   const product = await getProduct(req.query.id);
+-  if (!product || !product.active) return json(res, { error: "No encontrado" }, 404);
++  if (!product || !product.active || product.sold || product.reservedOrderId) {
++    return json(res, { error: "No encontrado" }, 404);
++  }
+   return json(res, { product });
+ }
+diff --git a/src/pages/carrito/index.js b/src/pages/carrito/index.js
+index 57d2e12..b4e78b7 100644
+--- a/src/pages/carrito/index.js
++++ b/src/pages/carrito/index.js
+@@ -1,16 +1,17 @@
+ import Head from "next/head";
+ import Link from "next/link";
+-import { useRouter } from "next/router";
+ import { useEffect, useMemo, useState } from "react";
+ import { PageShell, useAuth } from "@/components/SiteChrome";
+ import { Loader, ButtonSpinner } from "@/components/Loader";
+ import { Toast } from "@/components/Toast";
+ import { clearGuestCart, getGuestCart, setGuestCart } from "@/lib/store/auth-client";
++import { mergeGuestCart } from "@/lib/store/guest-cart";
+ import {
+   MX_STATES,
+   onlyDigits,
+   onlyLettersSpaces,
+   validatePhoneMx,
++  validateShippingMx,
+   validateZipMx,
+ } from "@/lib/store/mx-validate";
+ import { api, formatMxn } from "@/lib/store/client";
+@@ -29,31 +30,12 @@ const emptyShip = {
+   betweenStreets: "",
+ };
+ 
+-const REQUIRED_KEYS = [
+-  "fullName",
+-  "phone",
+-  "street",
+-  "extNumber",
+-  "neighborhood",
+-  "city",
+-  "state",
+-  "zip",
+-  "betweenStreets",
+-  "references",
+-];
+-
+ function isShippingComplete(s) {
+-  if (!s) return false;
+-  for (const k of REQUIRED_KEYS) {
+-    if (!String(s[k] || "").trim()) return false;
+-  }
+-  if (validatePhoneMx(s.phone) || validateZipMx(s.zip)) return false;
+-  return true;
++  return !validateShippingMx(s);
+ }
+ 
+ export default function Carrito() {
+   const { user, token, loading } = useAuth();
+-  const router = useRouter();
+   const [items, setItems] = useState([]);
+   const [products, setProducts] = useState([]);
+   const [shipping, setShipping] = useState(emptyShip);
+@@ -67,18 +49,30 @@ export default function Carrito() {
+     async function load() {
+       setLoadingCart(true);
+       try {
+-        const { products: catalog } = await api.products();
+-        setProducts(catalog);
+-        if (token && user) {
+-          const { cart } = await api.cart();
+-          setItems(cart.items || []);
++        const notice = sessionStorage.getItem("ol_cart_notice");
++        if (notice) {
++          sessionStorage.removeItem("ol_cart_notice");
++          setToastType("error");
++          setToast(notice);
++        }
++        if (token && user && user.role !== "admin") {
++          const merged = await mergeGuestCart();
++          if (merged?.dropped) {
++            setToastType("error");
++            setToast("Algunas piezas del carrito ya no estaban disponibles");
++          }
++          const { cart, products: mine } = await api.cart();
++          setProducts(mine || []);
++          setItems((cart.items || []).map((item) => ({ ...item, quantity: 1 })));
+           const saved = { ...emptyShip, ...(user.shipping || {}) };
+           if (!saved.fullName) saved.fullName = user.name || "";
+           if (!saved.phone) saved.phone = user.phone || "";
+           setShipping(saved);
+           setEditShip(!isShippingComplete(saved));
+         } else {
+-          setItems(getGuestCart());
++          const { products: catalog } = await api.products();
++          setProducts(catalog);
++          setItems(getGuestCart().map((item) => ({ ...item, quantity: 1 })));
+         }
+       } catch (e) {
+         setToastType("error");
+@@ -92,15 +86,14 @@ export default function Carrito() {
+ 
+   const rows = useMemo(
+     () =>
+-      items
+-        .map((i) => {
+-          const p = products.find((x) => x.id === i.productId);
+-          return p ? { ...i, product: p } : null;
+-        })
+-        .filter(Boolean),
++      items.map((i) => {
++        const p = products.find((x) => x.id === i.productId) || null;
++        return { ...i, quantity: 1, product: p };
++      }),
+     [items, products],
+   );
+-  const total = rows.reduce((s, r) => s + r.product.price * r.quantity, 0);
++  const payable = rows.filter((r) => r.product && r.product.stock >= 1 && !r.product.sold && r.product.active);
++  const total = payable.reduce((s, r) => s + r.product.price, 0);
+   const shipOk = isShippingComplete(shipping);
+ 
+   async function checkout() {
+@@ -123,14 +116,17 @@ export default function Carrito() {
+       try {
+         await api.updateProfile({ shipping });
+       } catch (_) {}
+-      const { order } = await api.checkout({
++      const data = await api.checkout({
+         shippingName: shipping.fullName,
+         shippingCity: shipping.city,
+         shipping,
+       });
+       clearGuestCart();
+       setItems([]);
+-      router.push(`/pedido/exito?id=${order.id}`);
++      const url = data.init_point || data.sandbox_init_point;
++      if (!url) throw new Error("Mercado Pago no devolvió el link de pago");
++      window.location.href = url;
++      return;
+     } catch (e) {
+       setToastType("error");
+       setToast(e.message);
+@@ -166,13 +162,15 @@ export default function Carrito() {
+                   className="flex gap-4 rounded-[var(--radius-lg)] border border-border bg-surface p-4"
+                 >
+                   <img
+-                    src={r.product.image || (r.product.images && r.product.images[0]) || ""}
++                    src={r.product?.image || (r.product?.images && r.product.images[0]) || ""}
+                     alt=""
+                     className="size-24 rounded-[var(--radius-md)] object-cover bg-elevated"
+                   />
+                   <div className="flex-1">
+-                    <h2 className="font-display text-xl">{r.product.name}</h2>
+-                    <p className="text-sm tabular-nums text-muted">{formatMxn(r.product.price)}</p>
++                    <h2 className="font-display text-xl">{r.product?.name || "Pieza no disponible"}</h2>
++                    <p className="text-sm tabular-nums text-muted">
++                      {r.product ? formatMxn(r.product.price) : "Ya no está disponible"}
++                    </p>
+                     <button
+                       type="button"
+                       className="mt-3 text-xs text-danger"
+@@ -202,6 +200,8 @@ export default function Carrito() {
+                   >
+                     Entrar para comprar
+                   </Link>
++                ) : user.role === "admin" ? (
++                  <p className="mt-4 text-sm text-muted">La cuenta de atelier no realiza compras.</p>
+                 ) : (
+                   <>
+                     <h3 className="mt-6 font-display text-xl">Datos de envío</h3>
+@@ -320,14 +320,19 @@ export default function Carrito() {
+                       </div>
+                     )}
+ 
++                    {payable.length !== rows.length ? (
++                      <p className="mt-4 text-sm text-danger">
++                        Hay una pieza que ya no está disponible. Quítala para continuar.
++                      </p>
++                    ) : null}
+                     <button
+                       type="button"
+-                      disabled={busy || !shipOk}
++                      disabled={busy || !shipOk || payable.length === 0 || payable.length !== rows.length}
+                       onClick={checkout}
+                       className="mt-5 inline-flex h-12 w-full items-center justify-center gap-2 rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg disabled:opacity-50"
+                     >
+                       {busy ? <ButtonSpinner /> : null}
+-                      Confirmar pedido
++                      Pagar con Mercado Pago
+                     </button>
+                   </>
+                 )}
+diff --git a/src/pages/cuenta/index.js b/src/pages/cuenta/index.js
+index 2f83820..a0ff613 100644
+--- a/src/pages/cuenta/index.js
++++ b/src/pages/cuenta/index.js
+@@ -13,7 +13,7 @@ import {
+   validateZipMx,
+ } from "@/lib/store/mx-validate";
+ import { setSession } from "@/lib/store/auth-client";
+-import { statusLabel, canEditShipping } from "@/lib/store/order-status";
++import { statusLabel, canEditShipping, paymentLabel } from "@/lib/store/order-status";
+ import { api, formatMxn } from "@/lib/store/client";
+ 
+ const emptyShipping = {
+@@ -236,9 +236,34 @@ export default function Cuenta() {
+                       <p className={`mt-1 text-sm ${o.status === "cancelado" ? "text-danger" : "text-gold-strong"}`}>
+                         {statusLabel(o.status || "recibido")}
+                       </p>
++                      <p className="text-sm text-muted">{paymentLabel(o.paymentStatus)}</p>
++                      {(o.items || []).map((item) => (
++                        <p key={item.productId} className="text-sm text-muted">
++                          {item.name}
++                        </p>
++                      ))}
+                       <p className="text-sm text-muted">
+                         {o.shippingName || o.shipping?.fullName} · {o.shippingCity || o.shipping?.city}
+                       </p>
++                      {o.paymentStatus === "pendiente" && (o.status === "recibido" || o.status === "confirmado") ? (
++                        <button
++                          type="button"
++                          className="mt-3 inline-flex h-10 items-center rounded-full bg-gold px-4 text-xs tracking-[0.16em] uppercase text-bg"
++                          onClick={async () => {
++                            try {
++                              const data = await api.mpCheckout(o.id);
++                              const url = data.init_point || data.sandbox_init_point;
++                              if (!url) throw new Error("Mercado Pago no devolvió el link de pago");
++                              window.location.href = url;
++                            } catch (err) {
++                              setToastType("error");
++                              setToast(err.message);
++                            }
++                          }}
++                        >
++                          Continuar al pago
++                        </button>
++                      ) : null}
+ 
+                       {canEditShipping(o.status || "recibido") ? (
+                         editingOrderId === o.id ? (
+@@ -246,10 +271,26 @@ export default function Cuenta() {
+                             <Field label="Nombre quien recibe" value={orderShip.fullName || ""} onChange={(v) => setOrderShip({ ...orderShip, fullName: v })} maxLength={80} />
+                             <Field label="Teléfono" value={orderShip.phone || ""} onChange={(v) => setOrderShip({ ...orderShip, phone: onlyDigits(v, 10) })} maxLength={10} />
+                             <Field label="Calle" value={orderShip.street || ""} onChange={(v) => setOrderShip({ ...orderShip, street: v })} maxLength={80} />
++                            <Field label="No. exterior" value={orderShip.extNumber || ""} onChange={(v) => setOrderShip({ ...orderShip, extNumber: v })} maxLength={10} />
++                            <Field label="No. interior" value={orderShip.intNumber || ""} onChange={(v) => setOrderShip({ ...orderShip, intNumber: v })} maxLength={10} />
+                             <Field label="Colonia" value={orderShip.neighborhood || ""} onChange={(v) => setOrderShip({ ...orderShip, neighborhood: v })} maxLength={60} />
+                             <Field label="Ciudad" value={orderShip.city || ""} onChange={(v) => setOrderShip({ ...orderShip, city: v })} maxLength={60} />
+-                            <Field label="Estado" value={orderShip.state || ""} onChange={(v) => setOrderShip({ ...orderShip, state: v })} maxLength={40} />
++                            <label className="block">
++                              <span className="mb-1 block text-xs tracking-[0.16em] uppercase text-subtle">Estado</span>
++                              <select
++                                value={orderShip.state || ""}
++                                onChange={(e) => setOrderShip({ ...orderShip, state: e.target.value })}
++                                className="h-12 w-full rounded-[var(--radius-md)] border border-border bg-bg px-4"
++                              >
++                                <option value="">Selecciona</option>
++                                {MX_STATES.map((s) => (
++                                  <option key={s} value={s}>{s}</option>
++                                ))}
++                              </select>
++                            </label>
+                             <Field label="C.P." value={orderShip.zip || ""} onChange={(v) => setOrderShip({ ...orderShip, zip: onlyDigits(v, 5) })} maxLength={5} />
++                            <Field label="Entre calles" value={orderShip.betweenStreets || ""} onChange={(v) => setOrderShip({ ...orderShip, betweenStreets: v })} maxLength={80} />
++                            <Field label="Referencias" value={orderShip.references || ""} onChange={(v) => setOrderShip({ ...orderShip, references: v })} maxLength={120} />
+                             <div className="flex gap-2 pt-1">
+                               <button
+                                 type="button"
+@@ -286,11 +327,13 @@ export default function Cuenta() {
+                                 phone: o.shipping?.phone || "",
+                                 street: o.shipping?.street || "",
+                                 extNumber: o.shipping?.extNumber || "",
++                                intNumber: o.shipping?.intNumber || "",
+                                 neighborhood: o.shipping?.neighborhood || "",
+                                 city: o.shipping?.city || o.shippingCity || "",
+                                 state: o.shipping?.state || "",
+                                 zip: o.shipping?.zip || "",
+                                 references: o.shipping?.references || "",
++                                betweenStreets: o.shipping?.betweenStreets || "",
+                               });
+                             }}
+                           >
+diff --git a/src/pages/pago/exito.js b/src/pages/pago/exito.js
+new file mode 100644
+index 0000000..7ec5169
+--- /dev/null
++++ b/src/pages/pago/exito.js
+@@ -0,0 +1,62 @@
++import Head from "next/head";
++import { useRouter } from "next/router";
++import { useEffect, useState } from "react";
++import { PaymentReturn } from "@/components/PaymentReturn";
++import { useAuth } from "@/components/SiteChrome";
++import { api } from "@/lib/store/client";
++
++export default function PagoExito() {
++  const router = useRouter();
++  const { token, loading } = useAuth();
++  const [remote, setRemote] = useState(null);
++  const ready = router.isReady && !loading;
++  const status = ready ? String(router.query.collection_status || router.query.status || "") : "";
++  const paymentId = ready ? router.query.payment_id || router.query.collection_id || "" : "";
++  const ref = ready ? String(router.query.external_reference || "") : "";
++  const rejected = Boolean(status && status !== "approved" && status !== "success");
++
++  useEffect(() => {
++    if (!ready || rejected || !paymentId || !token) return undefined;
++    let cancel = false;
++    api
++      .syncPayment(String(paymentId))
++      .then((data) => {
++        if (!cancel) setRemote(data);
++      })
++      .catch(() => {
++        if (!cancel) setRemote({ error: true });
++      });
++    return () => {
++      cancel = true;
++    };
++  }, [ready, rejected, paymentId, token]);
++
++  let message = "Estamos confirmando el pago con Mercado Pago.";
++  if (rejected) {
++    message = "Mercado Pago no marcó este pago como aprobado. Revisa el pedido en tu cuenta.";
++  } else if (ready && (!paymentId || !token)) {
++    message = "Si el cargo fue aprobado, el pedido pasa a confirmado en cuanto llegue la notificación.";
++  } else if (remote?.error) {
++    message = "El webhook confirmará el pago en breve. Puedes seguir el pedido en tu cuenta.";
++  } else if (remote?.order?.paymentStatus === "pagado") {
++    message = "Pago acreditado. El atelier ya puede preparar el envío.";
++  } else if (remote?.result?.conflict) {
++    message = "El pago se acreditó, pero la pieza ya no estaba disponible. Escríbenos para revisarlo.";
++  } else if (remote) {
++    message = "Recibimos la respuesta de Mercado Pago. El estado queda en Mis pedidos.";
++  }
++
++  const folio = remote?.order?.id || ref;
++
++  return (
++    <>
++      <Head>
++        <title>Pago recibido — Oro Lozano</title>
++      </Head>
++      <PaymentReturn kicker="Mercado Pago" title="Pago recibido">
++        <p>{message}</p>
++        {folio ? <p className="text-sm text-gold">Folio: {folio}</p> : null}
++      </PaymentReturn>
++    </>
++  );
++}
+diff --git a/src/pages/pago/fallo.js b/src/pages/pago/fallo.js
+new file mode 100644
+index 0000000..1085b0c
+--- /dev/null
++++ b/src/pages/pago/fallo.js
+@@ -0,0 +1,53 @@
++import Head from "next/head";
++import { useRouter } from "next/router";
++import { useEffect, useState } from "react";
++import { PaymentReturn } from "@/components/PaymentReturn";
++import { useAuth } from "@/components/SiteChrome";
++import { api } from "@/lib/store/client";
++
++export default function PagoFallo() {
++  const router = useRouter();
++  const { token, loading } = useAuth();
++  const [remote, setRemote] = useState(null);
++  const ready = router.isReady && !loading;
++  const paymentId = ready ? router.query.payment_id || router.query.collection_id || "" : "";
++  const ref = ready ? String(router.query.external_reference || "") : "";
++
++  useEffect(() => {
++    if (!ready || !paymentId || !token) return undefined;
++    let cancel = false;
++    api
++      .syncPayment(String(paymentId))
++      .then((data) => {
++        if (!cancel) setRemote(data);
++      })
++      .catch(() => {
++        if (!cancel) setRemote({ error: true });
++      });
++    return () => {
++      cancel = true;
++    };
++  }, [ready, paymentId, token]);
++
++  let message =
++    "El pago no se completó. El pedido no se borra: queda como no pagado y la pieza vuelve al catálogo cuando Mercado Pago confirma el rechazo.";
++  if (remote?.order?.paymentStatus === "pagado") {
++    message = "Este pago sí quedó aprobado. Revisa el pedido en tu cuenta.";
++  } else if (remote?.order?.status === "cancelado") {
++    message = "El pago fue rechazado o cancelado. La pieza quedó libre y el pedido sigue en tu historial.";
++  }
++
++  const folio = remote?.order?.id || ref;
++
++  return (
++    <>
++      <Head>
++        <title>Pago no completado — Oro Lozano</title>
++      </Head>
++      <PaymentReturn kicker="Mercado Pago" title="No se completó el pago">
++        <p>{message}</p>
++        {folio ? <p className="text-sm text-gold">Folio: {folio}</p> : null}
++      </PaymentReturn>
++    </>
++  );
++}
+diff --git a/src/pages/pago/pendiente.js b/src/pages/pago/pendiente.js
+new file mode 100644
+index 0000000..6934acb
+--- /dev/null
++++ b/src/pages/pago/pendiente.js
+@@ -0,0 +1,54 @@
++import Head from "next/head";
++import { useRouter } from "next/router";
++import { useEffect, useState } from "react";
++import { PaymentReturn } from "@/components/PaymentReturn";
++import { useAuth } from "@/components/SiteChrome";
++import { api } from "@/lib/store/client";
++import { paymentLabel } from "@/lib/store/order-status";
++
++export default function PagoPendiente() {
++  const router = useRouter();
++  const { token, loading } = useAuth();
++  const [remote, setRemote] = useState(null);
++  const ready = router.isReady && !loading;
++  const paymentId = ready ? router.query.payment_id || router.query.collection_id || "" : "";
++  const ref = ready ? String(router.query.external_reference || "") : "";
++
++  useEffect(() => {
++    if (!ready || !paymentId || !token) return undefined;
++    let cancel = false;
++    api
++      .syncPayment(String(paymentId))
++      .then((data) => {
++        if (!cancel) setRemote(data);
++      })
++      .catch(() => {
++        if (!cancel) setRemote({ error: true });
++      });
++    return () => {
++      cancel = true;
++    };
++  }, [ready, paymentId, token]);
++
++  let message =
++    "Tu pago sigue pendiente. La pieza queda reservada hasta que Mercado Pago lo confirme o lo rechace.";
++  if (remote?.order?.paymentStatus === "pagado") {
++    message = "El pago ya quedó acreditado. Puedes ver el pedido confirmado en tu cuenta.";
++  } else if (remote?.order?.paymentStatus) {
++    message = `${paymentLabel(remote.order.paymentStatus)}. Si pagaste en efectivo, la confirmación puede tardar.`;
++  }
++
++  const folio = remote?.order?.id || ref;
++
++  return (
++    <>
++      <Head>
++        <title>Pago pendiente — Oro Lozano</title>
++      </Head>
++      <PaymentReturn kicker="Mercado Pago" title="Pago pendiente">
++        <p>{message}</p>
++        {folio ? <p className="text-sm text-gold">Folio: {folio}</p> : null}
++      </PaymentReturn>
++    </>
++  );
++}
+diff --git a/src/pages/pedido/exito.js b/src/pages/pedido/exito.js
+index 5966535..ac0cbda 100644
+--- a/src/pages/pedido/exito.js
++++ b/src/pages/pedido/exito.js
+@@ -22,8 +22,8 @@ export default function PedidoExito() {
+           <p className="text-xs tracking-[0.28em] uppercase text-gold">Pedido registrado</p>
+           <h1 className="mt-3 font-display text-4xl">¡Gracias por tu compra!</h1>
+           <p className="mt-4 text-muted">
+-            Tu pedido quedó registrado. Pronto integraremos el pago en línea; por ahora el atelier
+-            confirmará el estatus desde el panel.
++            Si acabas de pagar, Mercado Pago confirma el cargo y el pedido pasa a confirmado.
++            También puedes revisar el estado en Mi cuenta.
+           </p>
+           {id ? <p className="mt-4 text-sm text-gold">Folio: {id}</p> : null}
+           <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:justify-center">
+diff --git a/src/pages/tienda/index.js b/src/pages/tienda/index.js
+index bf972f0..39f6bf7 100644
+--- a/src/pages/tienda/index.js
++++ b/src/pages/tienda/index.js
+@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
+ import { PageShell } from "@/components/SiteChrome";
+ import { api, formatMxn } from "@/lib/store/client";
+ 
+-const cats = [
++const FALLBACK_CATS = [
+   { id: "all", label: "Todo" },
+   { id: "anillos", label: "Anillos" },
+   { id: "collares", label: "Collares" },
+@@ -14,11 +14,21 @@ const cats = [
+ 
+ export default function Tienda() {
+   const [products, setProducts] = useState([]);
++  const [cats, setCats] = useState(FALLBACK_CATS);
+   const [cat, setCat] = useState("all");
+   const [err, setErr] = useState("");
+ 
+   useEffect(() => {
+     api.products().then((d) => setProducts(d.products)).catch((e) => setErr(e.message));
++    api
++      .publicSettings()
++      .then((d) => {
++        const extra = (d.categories || [])
++          .filter((c) => c && (c.id || c.slug) && c.name)
++          .map((c) => ({ id: c.slug || c.id, label: c.name }));
++        if (extra.length) setCats([{ id: "all", label: "Todo" }, ...extra]);
++      })
++      .catch(() => setCats(FALLBACK_CATS));
+   }, []);
+ 
+   const list = useMemo(
+diff --git a/supabase/README.md b/supabase/README.md
+index 499da91..af859cd 100644
+--- a/supabase/README.md
++++ b/supabase/README.md
+@@ -43,3 +43,17 @@ Si ya corriste `schema.sql`, ejecuta también en el SQL Editor:
+ `migration_v7.sql`
+ 
+ Crea tabla `admin_data` (categorías, spot por kilataje, margen, IVA).
++
++## Migration v9 y v10
++
++`migration_v9.sql` y `migration_v10.sql` agregan `products.sold`.
++
++## Migration v14 — Mercado Pago
++
++Después de las anteriores, ejecuta `migration_v14_pago.sql`.
++
++Agrega en `orders`: `payment_status`, `mp_preference_id`, `mp_payment_id`, `mp_status`, `mp_status_detail`, `paid_at`.
++
++Agrega en `products`: `reserved_order_id`, `reserved_at` (la pieza única se aparta al abrir el checkout).
++
++Los pedidos que ya existían quedan como `payment_status = pagado` (o `cancelado` si el pedido estaba cancelado) para que el atelier pueda seguir despachándolos.
+diff --git a/supabase/migration_v14_pago.sql b/supabase/migration_v14_pago.sql
+new file mode 100644
+index 0000000..0117ef8
+--- /dev/null
++++ b/supabase/migration_v14_pago.sql
+@@ -0,0 +1,56 @@
++-- Oro Lozano v14 — Mercado Pago (Checkout Pro)
++-- Ejecutar en el SQL Editor DESPUÉS de schema.sql y de migration_v7/v9/v10.
++-- Idempotente: se puede correr más de una vez.
++
++alter table public.orders add column if not exists payment_status text;
++alter table public.orders add column if not exists mp_preference_id text;
++alter table public.orders add column if not exists mp_payment_id text;
++alter table public.orders add column if not exists mp_status text;
++alter table public.orders add column if not exists mp_status_detail text;
++alter table public.orders add column if not exists paid_at timestamptz;
++
++-- Pedidos de antes de la pasarela: el atelier ya los cobró fuera de MP.
++-- Solo se rellenan filas con payment_status nulo (no toca pagos nuevos).
++update public.orders
++set payment_status = 'cancelado'
++where payment_status is null
++  and status = 'cancelado';
++
++update public.orders
++set payment_status = 'pagado'
++where payment_status is null
++  and status is distinct from 'cancelado';
++
++alter table public.orders alter column payment_status set default 'pendiente';
++alter table public.orders alter column payment_status set not null;
++
++do $$
++begin
++  if not exists (
++    select 1
++    from pg_constraint
++    where conname = 'orders_payment_status_check'
++      and conrelid = 'public.orders'::regclass
++  ) then
++    alter table public.orders
++      add constraint orders_payment_status_check
++      check (payment_status in ('pendiente', 'pagado', 'rechazado', 'cancelado', 'reembolsado'));
++  end if;
++end $$;
++
++create index if not exists orders_payment_status_idx on public.orders (payment_status);
++create index if not exists orders_mp_preference_id_idx on public.orders (mp_preference_id);
++
++-- Un pago de MP no puede aplicarse a dos pedidos. Los nulos (aún sin pago) quedan fuera.
++create unique index if not exists orders_mp_payment_id_uidx
++  on public.orders (mp_payment_id)
++  where mp_payment_id is not null;
++
++-- Reserva de pieza única mientras el cliente está en el checkout.
++-- Sin llave foránea: la reserva se escribe ANTES de insertar el pedido.
++alter table public.products add column if not exists reserved_order_id text;
++alter table public.products add column if not exists reserved_at timestamptz;
++
++create index if not exists products_reserved_order_idx
++  on public.products (reserved_order_id)
++  where reserved_order_id is not null;

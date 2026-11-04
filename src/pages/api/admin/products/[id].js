@@ -1,5 +1,5 @@
 import { currentUserFromRequest, json } from "@/lib/store/http";
-import { deleteProduct, updateProduct } from "@/lib/store/services";
+import { getProduct, softDeleteProduct, updateProduct } from "@/lib/store/services";
 
 export default async function handler(req, res) {
   const user = await currentUserFromRequest(req);
@@ -7,13 +7,28 @@ export default async function handler(req, res) {
   const { id } = req.query;
 
   if (req.method === "PUT") {
-    const product = await updateProduct(id, req.body || {});
-    if (!product) return json(res, { error: "No encontrado" }, 404);
+    const current = await getProduct(id);
+    if (!current) return json(res, { error: "No encontrado" }, 404);
+    if (current.sold || current.reservedOrderId) {
+      return json(res, { error: "Pieza vendida o reservada: solo lectura hasta liberarla" }, 409);
+    }
+    const body = { ...(req.body || {}) };
+    delete body.sold;
+    delete body.stock;
+    delete body.reservedOrderId;
+    delete body.reservedAt;
+    if (body.active !== false) body.stock = 1;
+    const product = await updateProduct(id, body);
     return json(res, { product });
   }
 
   if (req.method === "DELETE") {
-    await deleteProduct(id);
+    const current = await getProduct(id);
+    if (!current) return json(res, { error: "No encontrado" }, 404);
+    if (current.sold || current.reservedOrderId) {
+      return json(res, { error: "No se puede ocultar una pieza vendida o reservada" }, 409);
+    }
+    await softDeleteProduct(id);
     return json(res, { ok: true });
   }
 

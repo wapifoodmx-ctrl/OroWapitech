@@ -15,11 +15,14 @@ export function CartDrawer({ open, onClose }) {
     try {
       const { products } = await api.products();
       setCatalog(products);
-      if (token && user) {
-        const { cart } = await api.cart();
-        setItems(cart.items || []);
+      if (token && user && user.role !== "admin") {
+        const { cart, products: mine } = await api.cart();
+        setCatalog(mine || []);
+        setItems((cart.items || []).map((item) => ({ ...item, quantity: 1 })));
+      } else if (!token || !user) {
+        setItems(getGuestCart().map((item) => ({ ...item, quantity: 1 })));
       } else {
-        setItems(getGuestCart());
+        setItems([]);
       }
     } catch (e) {
       setMsg(e.message);
@@ -35,16 +38,13 @@ export function CartDrawer({ open, onClose }) {
   }, [open, token, user]);
 
   const rows = useMemo(() => {
-    return items
-      .map((i) => {
-        const p = catalog.find((x) => x.id === i.productId);
-        if (!p) return null;
-        return { ...i, product: p };
-      })
-      .filter(Boolean);
+    return items.map((i) => {
+      const p = catalog.find((x) => x.id === i.productId) || null;
+      return { ...i, quantity: 1, product: p };
+    });
   }, [items, catalog]);
 
-  const total = rows.reduce((s, r) => s + r.product.price * r.quantity, 0);
+  const total = rows.reduce((s, r) => s + (r.product ? r.product.price : 0), 0);
   const count = rows.reduce((s, r) => s + r.quantity, 0);
 
   async function setQty(productId, quantity) {
@@ -56,7 +56,7 @@ export function CartDrawer({ open, onClose }) {
         quantity <= 0
           ? getGuestCart().filter((i) => i.productId !== productId)
           : getGuestCart().map((i) =>
-              i.productId === productId ? { ...i, quantity } : i,
+              i.productId === productId ? { ...i, quantity: 1 } : i,
             );
       setGuestCart(next);
       setItems(next);
@@ -90,10 +90,12 @@ export function CartDrawer({ open, onClose }) {
             <div className="space-y-4">
               {rows.map((r) => (
                 <div key={r.productId} className="flex gap-3 rounded-[var(--radius-lg)] border border-border bg-surface p-3">
-                  <img src={r.product.image} alt="" className="size-16 rounded-md object-cover bg-elevated" />
+                  <img src={r.product?.image || ""} alt="" className="size-16 rounded-md object-cover bg-elevated" />
                   <div className="flex-1">
-                    <p className="font-display text-lg leading-tight">{r.product.name}</p>
-                    <p className="text-sm tabular-nums text-muted">{formatMxn(r.product.price)}</p>
+                    <p className="font-display text-lg leading-tight">{r.product?.name || "Pieza no disponible"}</p>
+                    <p className="text-sm tabular-nums text-muted">
+                      {r.product ? formatMxn(r.product.price) : "Quítala del carrito"}
+                    </p>
                     <div className="mt-2 flex items-center gap-2">
                       <button type="button" className="size-8 rounded-full border border-border" onClick={() => setQty(r.productId, r.quantity - 1)}>−</button>
                       <span className="tabular-nums text-sm">{r.quantity}</span>

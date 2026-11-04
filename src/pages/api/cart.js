@@ -1,5 +1,9 @@
 import { currentUserFromRequest, json } from "@/lib/store/http";
-import { getCart, getProduct, listProducts, setCart } from "@/lib/store/services";
+import { getCart, getProduct, getProductsByIds, setCart } from "@/lib/store/services";
+
+function unavailable(product) {
+  return !product || product.stock < 1 || product.sold || !product.active || product.reservedOrderId;
+}
 
 export default async function handler(req, res) {
   const user = await currentUserFromRequest(req);
@@ -7,7 +11,7 @@ export default async function handler(req, res) {
 
   if (req.method === "GET") {
     const cart = await getCart(user.id);
-    const products = await listProducts({ includeHidden: true });
+    const products = await getProductsByIds((cart.items || []).map((item) => item.productId));
     return json(res, { cart, products });
   }
 
@@ -18,7 +22,7 @@ export default async function handler(req, res) {
     const productId = req.body?.productId;
     if (!productId) return json(res, { error: "Producto requerido" }, 400);
     const product = await getProduct(productId);
-    if (!product || product.stock < 1 || product.sold || !product.active) {
+    if (unavailable(product)) {
       return json(res, { error: "Pieza no disponible" }, 404);
     }
     const cart = await getCart(user.id);
@@ -50,7 +54,7 @@ export default async function handler(req, res) {
       } else {
         // Si no estaba, añadirlo (mismo efecto que POST)
         const product = await getProduct(productId);
-        if (!product || product.stock < 1 || product.sold || !product.active) {
+        if (unavailable(product)) {
           return json(res, { error: "Pieza no disponible" }, 404);
         }
         items = [...cart.items, { productId, quantity: 1 }];
