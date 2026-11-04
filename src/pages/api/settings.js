@@ -1,8 +1,8 @@
-import { json } from "@/lib/store/http";
+import { json, withErrors } from "@/lib/store/http";
 import { getAdminData } from "@/lib/store/services";
 
 /** Público: categorías activas para filtros de tienda */
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
   try {
     const settings = await getAdminData();
@@ -20,3 +20,5 @@ export default async function handler(req, res) {
     });
   }
 }
+
+export default withErrors("api/settings", handler);

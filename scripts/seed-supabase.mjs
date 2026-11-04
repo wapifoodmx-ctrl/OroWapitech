@@ -165,6 +165,7 @@ try {
   console.log("\nSeed completo (contraseñas hasheadas con bcrypt).");
   console.log("Admin: hugo / 1");
   console.log("Cliente: juan / uwu");
+  console.log("Después corre migration_v15_auth.sql y luego: npm run auth:migrate");
 } catch (e) {
   console.error("\nSeed falló:", e.message);
   console.error("¿Ya corriste supabase/schema.sql en el SQL Editor?");

@@ -57,3 +57,15 @@ Agrega en `orders`: `payment_status`, `mp_preference_id`, `mp_payment_id`, `mp_s
 Agrega en `products`: `reserved_order_id`, `reserved_at` (la pieza única se aparta al abrir el checkout).
 
 Los pedidos que ya existían quedan como `payment_status = pagado` (o `cancelado` si el pedido estaba cancelado) para que el atelier pueda seguir despachándolos.
+
+## Migration v15 — Supabase Auth
+
+Después de la v14, en el SQL Editor: `migration_v15_auth.sql`.
+
+Luego, en la carpeta del proyecto (con la service role en `.env.local`):
+
+```powershell
+npm run auth:migrate
+```
+
+Eso crea las cuentas en Supabase Auth con la misma contraseña (el hash bcrypt) y las enlaza sin cambiar pedidos ni carritos.

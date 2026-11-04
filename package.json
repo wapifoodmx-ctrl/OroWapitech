@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs",
-    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs"
+    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs",
+    "test:auth": "node --test --test-concurrency=1 scripts/test-auth.mjs",
+    "auth:migrate": "node --env-file=.env.local scripts/migrate-auth-users.mjs"
   },
   "dependencies": {
     "@supabase/server": "^1.8.0",

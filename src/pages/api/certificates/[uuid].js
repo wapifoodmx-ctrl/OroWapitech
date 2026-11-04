@@ -1,7 +1,7 @@
-import { json } from "@/lib/store/http";
+import { json, withErrors } from "@/lib/store/http";
 import { getProductByCertificateUuid } from "@/lib/store/services";
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
   const product = await getProductByCertificateUuid(req.query.uuid);
   if (!product || !product.active) return json(res, { error: "Certificado no encontrado" }, 404);
@@ -19,3 +19,5 @@ export default async function handler(req, res) {
     },
   });
 }
+
+export default withErrors("api/certificates/[uuid]", handler);

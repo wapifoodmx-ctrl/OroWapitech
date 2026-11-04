@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { getAdminClient, publicImageUrl } from "./supabase.js";
-import { hashPassword, verifyPassword, generateOtp } from "./password.js";
-import { sendPasswordOtpEmail } from "./mail.js";
+import { hashPassword, verifyPassword } from "./password.js";
 import { assertStatusTransition } from "./order-status.js";
 import { normalizeSpotMap } from "./mx-validate.js";
 import { reservationIsStale } from "./payment-decision.js";
@@ -35,6 +34,7 @@ function mapUser(row) {
     phone: row.phone || "",
     role: row.role || "customer",
     shipping: row.shipping || {},
+    authUserId: row.auth_user_id || null,
     createdAt: row.created_at,
   };
 }
@@ -131,12 +131,42 @@ export async function findUserById(id) {
   return mapUser(data);
 }
 
+function dbError(error) {
+  const message = error?.message || "Error de base de datos";
+  if (/auth_user_id/.test(message)) {
+    return new Error("Falta correr supabase/migration_v15_auth.sql en el SQL Editor de Supabase.");
+  }
+  return new Error(message);
+}
+
+export async function findUserByAuthId(authUserId) {
+  if (!authUserId) return null;
+  const { data, error } = await sb()
+    .from("users")
+    .select("*")
+    .eq("auth_user_id", authUserId)
+    .maybeSingle();
+  if (error) throw dbError(error);
+  return mapUser(data);
+}
+
+export async function setUserAuthId(userId, authUserId) {
+  const { data, error } = await sb()
+    .from("users")
+    .update({ auth_user_id: authUserId })
+    .eq("id", userId)
+    .select("*")
+    .single();
+  if (error) throw dbError(error);
+  return mapUser(data);
+}
+
 export async function createUser(input) {
   const existing = await findUserByUsername(input.username);
   if (existing) throw new Error("El usuario ya existe");
-  const hashed = await hashPassword(input.password);
+  const hashed = input.password ? await hashPassword(input.password) : null;
   const user = {
-    id: uid("usr"),
+    id: input.id || uid("usr"),
     username: input.username.trim().toLowerCase(),
     password: hashed,
     name: (input.name || "").trim(),
@@ -169,11 +199,12 @@ export async function createUser(input) {
       phone: user.phone,
       role: user.role,
       shipping: user.shipping,
+      auth_user_id: input.authUserId || null,
       created_at: user.created_at,
     })
     .select("*")
     .single();
-  if (error) throw new Error(error.message);
+  if (error) throw dbError(error);
   return mapUser(data);
 }
 
@@ -541,83 +572,6 @@ export async function findUserByEmail(email) {
   if (error) throw new Error(error.message);
   return mapUser(data);
 }
-
-export async function requestPasswordReset(email) {
-  const user = await findUserByEmail(email);
-  // Respuesta genérica siempre (no revelar si el correo existe)
-  if (!user) {
-    return { ok: true };
-  }
-  const otp = generateOtp(6);
-  const otpHash = await hashPassword(otp);
-  const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  // Invalidar OTPs previos no usados
-  await sb()
-    .from("password_resets")
-    .update({ used_at: new Date().toISOString() })
-    .eq("email", user.email)
-    .is("used_at", null);
-
-  const { error } = await sb().from("password_resets").insert({
-    id: uid("rst"),
-    user_id: user.id,
-    email: user.email,
-    otp_hash: otpHash,
-    expires_at: expires,
-    created_at: new Date().toISOString(),
-  });
-  if (error) throw new Error(error.message);
-
-  await sendPasswordOtpEmail({ to: user.email, name: user.name, otp });
-  return { ok: true };
-}
-
-export async function resetPasswordWithOtp({ email, otp, newPassword }) {
-  if (!email || !otp || !newPassword) {
-    throw new Error("Correo, OTP y nueva contraseña son requeridos");
-  }
-  if (String(newPassword).length < 6) {
-    throw new Error("La contraseña debe tener al menos 6 caracteres");
-  }
-  const normalized = String(email).trim().toLowerCase();
-  const { data: rows, error } = await sb()
-    .from("password_resets")
-    .select("*")
-    .eq("email", normalized)
-    .is("used_at", null)
-    .order("created_at", { ascending: false })
-    .limit(5);
-  if (error) throw new Error(error.message);
-  if (!rows || rows.length === 0) {
-    throw new Error("Código inválido o expirado");
-  }
-  const now = Date.now();
-  let matched = null;
-  for (const row of rows) {
-    if (new Date(row.expires_at).getTime() < now) continue;
-    const ok = await verifyPassword(otp, row.otp_hash);
-    if (ok) {
-      matched = row;
-      break;
-    }
-  }
-  if (!matched) throw new Error("Código inválido o expirado");
-
-  const hashed = await hashPassword(newPassword);
-  const { error: upErr } = await sb()
-    .from("users")
-    .update({ password: hashed })
-    .eq("id", matched.user_id);
-  if (upErr) throw new Error(upErr.message);
-
-  await sb()
-    .from("password_resets")
-    .update({ used_at: new Date().toISOString() })
-    .eq("id", matched.id);
-
-  return { ok: true };
-}
-
 
 /* ---------- admin_data (settings / categories / spot) ---------- */
 

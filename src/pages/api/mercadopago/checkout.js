@@ -1,11 +1,11 @@
-import { currentUserFromRequest, json } from "@/lib/store/http";
+import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
 import { getOrder } from "@/lib/store/services";
 import { reopenOrderPreference } from "@/lib/store/payments";
 
 /** Nueva preferencia para un pedido propio que sigue pendiente de pago. */
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
-  const user = await currentUserFromRequest(req);
+  const user = await currentUserFromRequest(req, res);
   if (!user) return json(res, { error: "Inicia sesión" }, 401);
   if (user.role === "admin") return json(res, { error: "Usa una cuenta de cliente" }, 403);
 
@@ -27,3 +27,5 @@ export default async function handler(req, res) {
     return json(res, { error: error.message || "Error Mercado Pago" }, error.status || 500);
   }
 }
+
+export default withErrors("api/mercadopago/checkout", handler);

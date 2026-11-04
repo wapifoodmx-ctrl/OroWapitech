@@ -1,19 +1,18 @@
-import { json } from "@/lib/store/http";
-import { requestPasswordReset } from "@/lib/store/services";
+import { sendPasswordReset } from "@/lib/store/auth-session";
+import { json, withErrors } from "@/lib/store/http";
+import { validateEmail } from "@/lib/store/mx-validate";
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
-  const email = (req.body?.email || "").trim().toLowerCase();
+  const email = String(req.body?.email || "").trim().toLowerCase();
   if (!email) return json(res, { error: "Indica tu correo" }, 400);
-  try {
-    await requestPasswordReset(email);
-    // Siempre la misma respuesta (no filtrar existencia del correo)
-    return json(res, {
-      ok: true,
-      message: "Si el correo está registrado, enviamos un código OTP. Revisa tu bandeja (o la consola del servidor en modo pruebas).",
-    });
-  } catch (err) {
-    console.error("[forgot-password]", err);
-    return json(res, { error: err.message || "No se pudo procesar" }, 500);
-  }
+  const emailError = validateEmail(email);
+  if (emailError) return json(res, { error: emailError }, 400);
+  await sendPasswordReset(req, res, email);
+  return json(res, {
+    ok: true,
+    message: "Si el correo está registrado, te enviamos un enlace para restablecer la contraseña.",
+  });
 }
+
+export default withErrors("auth/forgot-password", handler);

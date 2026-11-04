@@ -1,4 +1,4 @@
-import { currentUserFromRequest, json } from "@/lib/store/http";
+import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
 import { uploadProductImage } from "@/lib/store/services";
 
 export const config = {
@@ -9,9 +9,9 @@ export const config = {
   },
 };
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
-  const user = await currentUserFromRequest(req);
+  const user = await currentUserFromRequest(req, res);
   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
 
   const { filename, contentType, dataBase64 } = req.body || {};
@@ -30,3 +30,5 @@ export default async function handler(req, res) {
     return json(res, { error: err.message || "Error al subir" }, 500);
   }
 }
+
+export default withErrors("api/admin/upload", handler);
