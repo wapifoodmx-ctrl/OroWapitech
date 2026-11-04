@@ -1,10 +1,12 @@
-import { deleteSession } from "@/lib/store/services";
-import { clearSessionCookie, getSessionId, json } from "@/lib/store/http";
+import { json, withErrors } from "@/lib/store/http";
+import { createSupabaseRouteClient } from "@/lib/store/supabase";
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
-  const id = getSessionId(req);
-  if (id) await deleteSession(id);
-  clearSessionCookie(res);
+  const supabase = createSupabaseRouteClient(req, res);
+  const { error } = await supabase.auth.signOut();
+  if (error) return json(res, { error: error.message }, 400);
   return json(res, { ok: true });
 }
+
+export default withErrors("auth/logout", handler);

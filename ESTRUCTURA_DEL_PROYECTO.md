@@ -1,13 +1,13 @@
 # Estructura del proyecto — Oro Lozano
 
-Documento de referencia del sistema (v14, pago con Mercado Pago).
+Documento de referencia del sistema (v15, Supabase Auth + Mercado Pago).
 
 ## Stack
 
 - **Next.js** (Pages Router) + **Tailwind CSS**
-- **Supabase** (Postgres + Storage)
-- **Auth propia** con JWT + cookie + **bcrypt**
-- Recuperación de contraseña por **OTP** (Resend, o consola si no hay llave)
+- **Supabase** (Postgres + Storage + **Auth**)
+- Sesión con **@supabase/ssr** y cookies. El servidor valida con `getUser()`.
+- Recuperación de contraseña con el correo de Supabase (enlace), no con Resend.
 - **Mercado Pago Checkout Pro** (preferencia + webhook). Mismo estilo de llamada que NewWapifood: `fetch` a `https://api.mercadopago.com`, sin SDK en el navegador.
 
 ## Árbol principal
@@ -15,14 +15,18 @@ Documento de referencia del sistema (v14, pago con Mercado Pago).
 ```
 OroLozano/
 ├── scripts/seed-supabase.mjs
-├── scripts/test-pago.mjs          # decisiones de pago, firma y preferencia (mock)
+├── scripts/migrate-auth-users.mjs # pasa usuarios actuales a Supabase Auth
+├── scripts/test-pago.mjs
+├── scripts/test-auth.mjs
 ├── patches/orolozano-v14-pago.patch
+├── patches/orolozano-v15-auth.patch
 ├── supabase/
 │   ├── schema.sql
-│   ├── migration_v7.sql           # admin_data
-│   ├── migration_v9.sql           # products.sold
+│   ├── migration_v7.sql
+│   ├── migration_v9.sql
 │   ├── migration_v10.sql
-│   └── migration_v14_pago.sql     # pago MP + reserva de pieza
+│   ├── migration_v14_pago.sql
+│   └── migration_v15_auth.sql     # enlace con auth.users + RLS
 ├── src/
 │   ├── components/
 │   │   ├── AuthProvider.js        # sesión + fusión del carrito invitado
@@ -38,7 +42,9 @@ OroLozano/
 │   └── pages/
 │       ├── carrito/               # envío MX + redirect a MP
 │       ├── pago/exito|pendiente|fallo
-│       ├── cuenta/                # pedidos, pago, envío
+│       ├── cuenta/                # entrar, pedidos, pago, envío
+│       ├── cuenta/restablecer.js  # nueva contraseña desde el correo
+│       ├── auth/callback.js       # confirma el enlace de Supabase
 │       ├── admin/                 # piezas, despacho, settings
 │       └── api/
 │           ├── orders.js
@@ -53,21 +59,29 @@ OroLozano/
 
 | Tabla | Uso |
 |--------|-----|
-| `users` | Cuentas, perfil, shipping JSONB |
+| `users` | Perfil, envío y `auth_user_id` (el id de Auth). El id propio no cambia |
 | `products` | Pieza única, certificado, `sold`, reserva (`reserved_order_id`) |
 | `carts` | Carrito del cliente logueado |
 | `orders` | Pedidos que no se borran, estatus, pago MP |
-| `sessions` | Cookie de sesión |
-| `password_resets` | OTP hasheado (15 min) |
+| `sessions` | Ya no se usa para entrar (queda de la auth anterior) |
+| `password_resets` | Ya no se usa (el correo lo manda Supabase) |
 | `admin_data` | Categorías, spot por kilataje, margen, IVA |
 | Storage `products` | Fotos |
 
 Columnas de pago en `orders`: `payment_status` (`pendiente`, `pagado`, `rechazado`, `cancelado`, `reembolsado`), `mp_preference_id`, `mp_payment_id`, `mp_status`, `mp_status_detail`, `paid_at`.
 
+## Cómo se entra
+
+1. Registro y login usan Supabase Auth. Se puede entrar con el usuario de siempre (`hugo`, `juan`) o con el correo. La sesión queda en cookies; las API la leen en el servidor.
+2. Al entrar, el carrito armado sin cuenta se pasa al carrito del cliente.
+3. "Olvidé mi contraseña" manda un enlace al correo. El enlace vuelve a `/auth/callback` y de ahí a `/cuenta/restablecer`.
+4. Un usuario que ya existía conserva su id, sus pedidos y su hash bcrypt. El script `npm run auth:migrate` lo crea en Auth. Si todavía no se corrió el script, el primer login con la contraseña de siempre también lo enlaza.
+5. Hugo sigue siendo admin por `users.role` y por `app_metadata.role`. El Atelier lo comprueba el servidor. El rol no se puede cambiar desde el navegador.
+
 ## Roles
 
 - **customer**: arma carrito, paga, ve pedidos y corrige el envío mientras el pedido está recibido o confirmado.
-- **admin** (`hugo`): Atelier. No compra. Despacha solo si el pago está `pagado` (los pedidos viejos, previos a esta pasarela, se migran como pagados).
+- **admin** (`hugo`): Atelier. No compra. Despacha solo si el pago está `pagado` (los pedidos viejos, previos a la pasarela, se migran como pagados).
 
 ## Precio
 
@@ -112,14 +126,11 @@ WapiFood cobra planes de restaurante. Esta tienda cobra pedidos.
 
 | Variable | Dónde se obtiene | Dónde se pone |
 |----------|------------------|---------------|
-| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Vercel y `.env.local` |
-| `SUPABASE_SECRET_KEY` | Supabase → API → secret / service_role. Solo servidor | Vercel (Production y Preview), nunca `NEXT_PUBLIC_` |
-| `SUPABASE_PUBLISHABLE_KEY` | Supabase → API → publishable / anon | Vercel |
-| `NEXT_PUBLIC_SUPABASE_URL` | La misma Project URL | Vercel |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | La misma llave publishable | Vercel |
-| `OL_JWT_SECRET` | Una cadena larga generada por ti | Vercel |
-| `RESEND_API_KEY` | resend.com → API Keys. Opcional | Vercel |
-| `MAIL_FROM` | Un remitente verificado en Resend | Vercel |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Vercel. Es la que ya está |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase → API → publishable / anon | Vercel. Es la que ya está |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → API → service_role. Solo servidor | Vercel. Es la que ya está. Nunca con `NEXT_PUBLIC_` |
+| `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_PUBLISHABLE_KEY` | Alias opcionales de las tres de arriba | No hace falta duplicarlas |
+| `OL_JWT_SECRET`, `RESEND_API_KEY`, `MAIL_FROM` | Ya no se usan | Se pueden borrar de Vercel |
 | `MERCADO_PAGO_ACCESS_TOKEN` | [Mercado Pago Developers](https://www.mercadopago.com.mx/developers/panel/app) → tu aplicación → **Credenciales de prueba** o **Credenciales de producción** → Access Token. Pruebas: empieza con `TEST-` | Vercel → Settings → Environment Variables |
 | `MERCADO_PAGO_PUBLIC_KEY` | La misma pantalla de credenciales → Public Key. La app no la usa en el navegador; se guarda para tener el par completo, como en WapiFood | Vercel |
 | `MERCADO_PAGO_WEBHOOK_SECRET` | Developers → tu aplicación → **Webhooks** → Configurar notificaciones. Al guardar la URL, MP muestra la **clave secreta** de la firma | Vercel. Sin esta clave el webhook responde 401 |
@@ -135,10 +146,10 @@ No hace falta `NEXT_PUBLIC_SITE_URL`. El origen sale de la petición y, en Verce
 https://TU-DOMINIO/api/mercadopago/webhook
 ```
 
-Ejemplo, si el dominio de producción es `orolozano.vercel.app`:
+Ejemplo de producción:
 
 ```
-https://orolozano.vercel.app/api/mercadopago/webhook
+https://oro-wapitech.vercel.app/api/mercadopago/webhook
 ```
 
 En el panel: Developers → tu aplicación → Webhooks → **Modo de prueba** o **Modo productivo**, según el token.
@@ -162,15 +173,25 @@ Mercado Pago tiene que poder hacer POST público a esa URL (HTTPS). `http://loca
 
 `npm run test:pago` cubre la firma, la preferencia (mock) y los cambios de estado sin llaves reales. `MERCADO_PAGO_MOCK=1` arma una preferencia falsa y redirige a `/pago/exito` sin hablar con MP; no lo prendas en Vercel.
 
+## Auth en el panel de Supabase
+
+1. Corre `migration_v15_auth.sql` y después, en tu máquina, `npm run auth:migrate` con la service role en `.env.local`.
+2. **Authentication → URL Configuration**
+   - Site URL: `https://oro-wapitech.vercel.app`
+   - Redirect URLs: `https://oro-wapitech.vercel.app/**` y `http://localhost:3000/**`
+3. **Authentication → Emails**: deja la plantilla de "Reset password" y "Confirm signup". El enlace debe usar `{{ .ConfirmationURL }}` (la plantilla por defecto ya lo hace).
+4. El correo incluido de Supabase tiene un límite bajo (unos pocos por hora). Para la tienda real conviene **Authentication → SMTP** con un correo propio (Resend, el del dominio, etc.). Si no, los clientes pueden quedarse sin correo de recuperación cuando haya varios pedidos de enlace.
+5. Si alguna contraseña vieja tiene menos de 6 caracteres (la de demostración `1`), en **Authentication → Providers → Email** baja "Minimum password length" o restablécela con el enlace.
+
 ## Setup de base
 
-1. SQL, en orden: `schema.sql`, `migration_v7.sql`, `migration_v9.sql`, `migration_v10.sql`, `migration_v14_pago.sql`
+1. SQL, en orden: `schema.sql`, `migration_v7.sql`, `migration_v9.sql`, `migration_v10.sql`, `migration_v14_pago.sql`, `migration_v15_auth.sql`
 2. `.env.local` a partir de `.env.example`
-3. `npm install` → `npm run seed:supabase` → `npm run dev`
+3. `npm install` → `npm run seed:supabase` → `npm run auth:migrate` → `npm run dev`
 
 ## Seguridad
 
-- La secret key de Supabase y el access token de MP solo viven en el servidor.
-- Contraseñas con bcrypt. OTP hasheado.
+- La service role y el access token de MP solo viven en el servidor. Se leen al atender la petición, no se congelan vacías en el build.
+- La sesión la firma Supabase. El rol admin no se toma de datos que el usuario pueda editar.
 - El webhook no aplica un pago si la firma no coincide.
 - El envío sigue en JSONB plano (no cifrado).

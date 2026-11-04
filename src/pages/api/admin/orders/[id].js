@@ -1,4 +1,4 @@
-import { currentUserFromRequest, json } from "@/lib/store/http";
+import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
 import {
   updateOrderStatus,
   releaseProductIfHeldBy,
@@ -9,8 +9,8 @@ import { ORDER_STATUSES, canAdvanceFulfillment } from "@/lib/store/order-status"
 
 const ALLOWED = new Set(ORDER_STATUSES.map((s) => s.id));
 
-export default async function handler(req, res) {
-  const user = await currentUserFromRequest(req);
+async function handler(req, res) {
+  const user = await currentUserFromRequest(req, res);
   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
   const { id } = req.query;
 
@@ -74,3 +74,5 @@ export default async function handler(req, res) {
 
   return json(res, { error: "Método no permitido" }, 405);
 }
+
+export default withErrors("api/admin/orders/[id]", handler);

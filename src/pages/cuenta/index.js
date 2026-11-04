@@ -42,8 +42,6 @@ export default function Cuenta() {
   const [profile, setProfile] = useState({ name: "", email: "", phone: "" });
   const [shipping, setShipping] = useState(emptyShipping);
   const [saved, setSaved] = useState("");
-  const [otp, setOtp] = useState("");
-  const [newPassword, setNewPassword] = useState("");
   const [recoverEmail, setRecoverEmail] = useState("");
   const [toast, setToast] = useState("");
   const [toastType, setToastType] = useState("success");
@@ -368,7 +366,7 @@ export default function Cuenta() {
             <p className="mt-3 text-center text-sm text-muted">
               {mode === "login" || mode === "register"
                 ? "Cliente: juan / uwu · Admin: hugo / 1"
-                : "Te enviaremos un código OTP al correo registrado"}
+                : "Te enviamos un enlace al correo para elegir una contraseña nueva"}
             </p>
 
             {(mode === "login" || mode === "register") && (
@@ -380,10 +378,15 @@ export default function Cuenta() {
                   try {
                     if (mode === "login") {
                       const data = await api.login(username, password);
-                      setAuth(data.token, data.user);
+                      setAuth(data.token || "session", data.user);
                     } else {
                       const data = await api.register({ username, password, name, email });
-                      setAuth(data.token, data.user);
+                      if (data.needsConfirmation) {
+                        setSaved(data.message);
+                        setMode("login");
+                        return;
+                      }
+                      setAuth(data.token || "session", data.user);
                     }
                     await refresh();
                   } catch (err) {
@@ -400,6 +403,7 @@ export default function Cuenta() {
                 <Field label="Usuario" value={username} onChange={setUsername} />
                 <Field label="Contraseña" value={password} onChange={setPassword} type="password" />
                 {error ? <p className="text-sm text-danger">{error}</p> : null}
+                {saved ? <p className="text-sm text-gold">{saved}</p> : null}
                 <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
                   {mode === "login" ? "Entrar" : "Registrarme"}
                 </button>
@@ -415,8 +419,7 @@ export default function Cuenta() {
                   setSaved("");
                   try {
                     const res = await api.forgotPassword(recoverEmail);
-                    setSaved(res.message || "Revisa tu correo");
-                    setMode("reset");
+                    setSaved(res.message || "Revisa tu correo y abre el enlace");
                   } catch (err) {
                     setError(err.message);
                   }
@@ -426,43 +429,21 @@ export default function Cuenta() {
                 {error ? <p className="text-sm text-danger">{error}</p> : null}
                 {saved ? <p className="text-sm text-gold">{saved}</p> : null}
                 <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
-                  Enviar código OTP
+                  Enviar enlace
                 </button>
+                <Link href="/cuenta/restablecer" className="block text-center text-sm text-gold">
+                  Ya abrí el enlace del correo
+                </Link>
               </form>
             )}
 
             {mode === "reset" && (
-              <form
-                className="mt-8 space-y-3"
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  setError("");
-                  setSaved("");
-                  try {
-                    const res = await api.resetPassword({
-                      email: recoverEmail,
-                      otp,
-                      newPassword,
-                    });
-                    setSaved(res.message || "Contraseña actualizada");
-                    setMode("login");
-                    setPassword("");
-                    setOtp("");
-                    setNewPassword("");
-                  } catch (err) {
-                    setError(err.message);
-                  }
-                }}
-              >
-                <Field label="Correo" value={recoverEmail} onChange={setRecoverEmail} />
-                <Field label="Código OTP (6 dígitos)" value={otp} onChange={setOtp} />
-                <Field label="Nueva contraseña" value={newPassword} onChange={setNewPassword} type="password" />
-                {error ? <p className="text-sm text-danger">{error}</p> : null}
-                {saved ? <p className="text-sm text-gold">{saved}</p> : null}
-                <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
-                  Guardar nueva contraseña
-                </button>
-              </form>
+              <div className="mt-8 space-y-3 text-sm text-muted">
+                <p>Abre el enlace que llegó a tu correo. Ahí podrás escribir la contraseña nueva.</p>
+                <Link href="/cuenta/restablecer" className="inline-block text-gold">
+                  Ya abrí el enlace
+                </Link>
+              </div>
             )}
 
             <div className="mt-6 space-y-2 text-center text-sm text-muted">

@@ -1,7 +1,7 @@
-import { json } from "@/lib/store/http";
+import { json, withErrors } from "@/lib/store/http";
 import { getProduct } from "@/lib/store/services";
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
   const product = await getProduct(req.query.id);
   if (!product || !product.active || product.sold || product.reservedOrderId) {
@@ -9,3 +9,5 @@ export default async function handler(req, res) {
   }
   return json(res, { product });
 }
+
+export default withErrors("api/products/[id]", handler);

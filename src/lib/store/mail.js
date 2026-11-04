@@ -1,4 +1,5 @@
 /**
+ * Ya no lo usa el sitio (v15): la recuperación la manda Supabase Auth.
  * Envío de correo para OTP de recuperación.
  * Prioridad:
  *  1. RESEND_API_KEY + MAIL_FROM  → Resend

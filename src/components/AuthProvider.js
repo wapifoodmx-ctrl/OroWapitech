@@ -1,10 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import {
-  clearSession,
-  getStoredToken,
-  getStoredUser,
-  setSession,
-} from "@/lib/store/auth-client";
+import { clearSession, setSession } from "@/lib/store/auth-client";
 import { api } from "@/lib/store/client";
 import { mergeGuestCart } from "@/lib/store/guest-cart";
 
@@ -23,40 +18,27 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const mergedFor = useRef("");
 
-  const hydrate = useCallback(() => {
-    const t = getStoredToken();
-    const u = getStoredUser();
-    setToken(t);
-    setUser(u);
-  }, []);
-
   const refresh = useCallback(async () => {
-    hydrate();
-    const t = getStoredToken();
-    if (!t) {
-      setUser(null);
-      setToken(null);
-      setLoading(false);
-      return;
-    }
     try {
       const data = await api.me();
       if (data.user) {
         setUser(data.user);
-        setSession(t, data.user);
+        setToken("session");
+        setSession("session", data.user);
       } else {
         clearSession();
         setUser(null);
         setToken(null);
       }
-    } catch {
+    } catch (error) {
+      console.error("[orolozano] sesion", error?.message || error);
       clearSession();
       setUser(null);
       setToken(null);
     } finally {
       setLoading(false);
     }
-  }, [hydrate]);
+  }, []);
 
   const logout = useCallback(async () => {
     await api.logout();
@@ -71,21 +53,26 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
-    hydrate();
-    refresh();
-    const onAuth = () => hydrate();
-    window.addEventListener("ol-auth-change", onAuth);
-    window.addEventListener("storage", onAuth);
-    return () => {
-      window.removeEventListener("ol-auth-change", onAuth);
-      window.removeEventListener("storage", onAuth);
+    const timer = window.setTimeout(() => {
+      refresh();
+    }, 0);
+    const onAuth = () => {
+      refresh();
     };
-  }, [hydrate, refresh]);
+    window.addEventListener("ol-auth-change", onAuth);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("ol-auth-change", onAuth);
+    };
+  }, [refresh]);
 
   useEffect(() => {
-    if (loading || !token || !user || user.role === "admin") return;
-    if (mergedFor.current === token) return;
-    mergedFor.current = token;
+    if (loading || !user || user.role === "admin") {
+      if (!user) mergedFor.current = "";
+      return;
+    }
+    if (mergedFor.current === user.id) return;
+    mergedFor.current = user.id;
     mergeGuestCart()
       .then((result) => {
         if (result?.dropped) {
@@ -99,7 +86,7 @@ export function AuthProvider({ children }) {
       .catch(() => {
         mergedFor.current = "";
       });
-  }, [loading, token, user]);
+  }, [loading, user]);
 
   const value = useMemo(
     () => ({ user, token, loading, refresh, logout, setAuth }),

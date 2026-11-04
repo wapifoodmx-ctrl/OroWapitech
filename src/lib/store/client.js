@@ -1,13 +1,11 @@
-import { clearSession, getStoredToken, setSession } from "./auth-client";
+import { clearSession, setSession } from "./auth-client";
 
 async function request(url, init = {}) {
-  const token = typeof window !== "undefined" ? getStoredToken() : null;
   const res = await fetch(url, {
     ...init,
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init.headers ?? {}),
     },
   });
@@ -23,7 +21,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });
-    if (data.token && data.user) setSession(data.token, data.user);
+    if (data.user) setSession("session", data.user);
     return data;
   },
   register: async (payload) => {
@@ -31,7 +29,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    if (data.token && data.user) setSession(data.token, data.user);
+    if (data.user) setSession("session", data.user);
     return data;
   },
   forgotPassword: (email) =>

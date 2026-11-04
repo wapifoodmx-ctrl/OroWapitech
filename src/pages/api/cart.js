@@ -1,12 +1,12 @@
-import { currentUserFromRequest, json } from "@/lib/store/http";
+import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
 import { getCart, getProduct, getProductsByIds, setCart } from "@/lib/store/services";
 
 function unavailable(product) {
   return !product || product.stock < 1 || product.sold || !product.active || product.reservedOrderId;
 }
 
-export default async function handler(req, res) {
-  const user = await currentUserFromRequest(req);
+async function handler(req, res) {
+  const user = await currentUserFromRequest(req, res);
   if (!user) return json(res, { error: "Inicia sesión" }, 401);
 
   if (req.method === "GET") {
@@ -66,3 +66,5 @@ export default async function handler(req, res) {
 
   return json(res, { error: "Método no permitido" }, 405);
 }
+
+export default withErrors("api/cart", handler);
