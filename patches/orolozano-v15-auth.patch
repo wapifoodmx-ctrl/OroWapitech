@@ -1,0 +1,2346 @@
+diff --git a/.env.example b/.env.example
+index 48460ca..9f4837c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,27 +1,27 @@
+ # Copia a .env.local. No pongas secretos reales en este archivo.
+-# El build de Next no debe fallar si faltan: se leen al cobrar o al consultar Supabase.
++# Las variables se leen cuando la función corre (no hace falta repetirlas con otro nombre).
+ 
+-# Supabase — servidor
+-SUPABASE_URL=
+-SUPABASE_SECRET_KEY=
+-SUPABASE_PUBLISHABLE_KEY=
+-
+-# Supabase — navegador (las mismas URLs/llaves públicas)
++# Supabase — las que usa el sitio en Vercel
+ NEXT_PUBLIC_SUPABASE_URL=
+ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
++SUPABASE_SERVICE_ROLE_KEY=
+ 
+-# Auth propia
+-OL_JWT_SECRET=
+-
+-# Correo OTP (opcional). Sin RESEND_API_KEY el código se imprime en la consola del servidor.
+-RESEND_API_KEY=
+-MAIL_FROM=
++# Alias opcionales (si ya las tenías con otro nombre)
++# SUPABASE_URL=
++# SUPABASE_SECRET_KEY=
++# SUPABASE_PUBLISHABLE_KEY=
++# NEXT_PUBLIC_SUPABASE_ANON_KEY=
+ 
+-# Mercado Pago — los mismos nombres que NewWapifood
++# Mercado Pago
+ MERCADO_PAGO_ACCESS_TOKEN=
+ MERCADO_PAGO_PUBLIC_KEY=
+ MERCADO_PAGO_WEBHOOK_SECRET=
+ MERCADO_PAGO_COUNTRY=MX
+ 
++# Ya no se usan (se pueden borrar de Vercel):
++# OL_JWT_SECRET
++# RESEND_API_KEY
++# MAIL_FROM
++
+ # Solo desarrollo: simula la preferencia sin llamar a Mercado Pago. No lo actives en Vercel.
+ # MERCADO_PAGO_MOCK=1
+diff --git a/ESTRUCTURA_DEL_PROYECTO.md b/ESTRUCTURA_DEL_PROYECTO.md
+index fa2faee..ed612a5 100644
+--- a/ESTRUCTURA_DEL_PROYECTO.md
++++ b/ESTRUCTURA_DEL_PROYECTO.md
+@@ -1,13 +1,13 @@
+ # Estructura del proyecto — Oro Lozano
+ 
+-Documento de referencia del sistema (v14, pago con Mercado Pago).
++Documento de referencia del sistema (v15, Supabase Auth + Mercado Pago).
+ 
+ ## Stack
+ 
+ - **Next.js** (Pages Router) + **Tailwind CSS**
+-- **Supabase** (Postgres + Storage)
+-- **Auth propia** con JWT + cookie + **bcrypt**
+-- Recuperación de contraseña por **OTP** (Resend, o consola si no hay llave)
++- **Supabase** (Postgres + Storage + **Auth**)
++- Sesión con **@supabase/ssr** y cookies. El servidor valida con `getUser()`.
++- Recuperación de contraseña con el correo de Supabase (enlace), no con Resend.
+ - **Mercado Pago Checkout Pro** (preferencia + webhook). Mismo estilo de llamada que NewWapifood: `fetch` a `https://api.mercadopago.com`, sin SDK en el navegador.
+ 
+ ## Árbol principal
+@@ -15,14 +15,18 @@ Documento de referencia del sistema (v14, pago con Mercado Pago).
+ ```
+ OroLozano/
+ ├── scripts/seed-supabase.mjs
+-├── scripts/test-pago.mjs          # decisiones de pago, firma y preferencia (mock)
++├── scripts/migrate-auth-users.mjs # pasa usuarios actuales a Supabase Auth
++├── scripts/test-pago.mjs
++├── scripts/test-auth.mjs
+ ├── patches/orolozano-v14-pago.patch
++├── patches/orolozano-v15-auth.patch
+ ├── supabase/
+ │   ├── schema.sql
+-│   ├── migration_v7.sql           # admin_data
+-│   ├── migration_v9.sql           # products.sold
++│   ├── migration_v7.sql
++│   ├── migration_v9.sql
+ │   ├── migration_v10.sql
+-│   └── migration_v14_pago.sql     # pago MP + reserva de pieza
++│   ├── migration_v14_pago.sql
++│   └── migration_v15_auth.sql     # enlace con auth.users + RLS
+ ├── src/
+ │   ├── components/
+ │   │   ├── AuthProvider.js        # sesión + fusión del carrito invitado
+@@ -38,7 +42,9 @@ OroLozano/
+ │   └── pages/
+ │       ├── carrito/               # envío MX + redirect a MP
+ │       ├── pago/exito|pendiente|fallo
+-│       ├── cuenta/                # pedidos, pago, envío
++│       ├── cuenta/                # entrar, pedidos, pago, envío
++│       ├── cuenta/restablecer.js  # nueva contraseña desde el correo
++│       ├── auth/callback.js       # confirma el enlace de Supabase
+ │       ├── admin/                 # piezas, despacho, settings
+ │       └── api/
+ │           ├── orders.js
+@@ -53,21 +59,29 @@ OroLozano/
+ 
+ | Tabla | Uso |
+ |--------|-----|
+-| `users` | Cuentas, perfil, shipping JSONB |
++| `users` | Perfil, envío y `auth_user_id` (el id de Auth). El id propio no cambia |
+ | `products` | Pieza única, certificado, `sold`, reserva (`reserved_order_id`) |
+ | `carts` | Carrito del cliente logueado |
+ | `orders` | Pedidos que no se borran, estatus, pago MP |
+-| `sessions` | Cookie de sesión |
+-| `password_resets` | OTP hasheado (15 min) |
++| `sessions` | Ya no se usa para entrar (queda de la auth anterior) |
++| `password_resets` | Ya no se usa (el correo lo manda Supabase) |
+ | `admin_data` | Categorías, spot por kilataje, margen, IVA |
+ | Storage `products` | Fotos |
+ 
+ Columnas de pago en `orders`: `payment_status` (`pendiente`, `pagado`, `rechazado`, `cancelado`, `reembolsado`), `mp_preference_id`, `mp_payment_id`, `mp_status`, `mp_status_detail`, `paid_at`.
+ 
++## Cómo se entra
++
++1. Registro y login usan Supabase Auth. Se puede entrar con el usuario de siempre (`hugo`, `juan`) o con el correo. La sesión queda en cookies; las API la leen en el servidor.
++2. Al entrar, el carrito armado sin cuenta se pasa al carrito del cliente.
++3. "Olvidé mi contraseña" manda un enlace al correo. El enlace vuelve a `/auth/callback` y de ahí a `/cuenta/restablecer`.
++4. Un usuario que ya existía conserva su id, sus pedidos y su hash bcrypt. El script `npm run auth:migrate` lo crea en Auth. Si todavía no se corrió el script, el primer login con la contraseña de siempre también lo enlaza.
++5. Hugo sigue siendo admin por `users.role` y por `app_metadata.role`. El Atelier lo comprueba el servidor. El rol no se puede cambiar desde el navegador.
++
+ ## Roles
+ 
+ - **customer**: arma carrito, paga, ve pedidos y corrige el envío mientras el pedido está recibido o confirmado.
+-- **admin** (`hugo`): Atelier. No compra. Despacha solo si el pago está `pagado` (los pedidos viejos, previos a esta pasarela, se migran como pagados).
++- **admin** (`hugo`): Atelier. No compra. Despacha solo si el pago está `pagado` (los pedidos viejos, previos a la pasarela, se migran como pagados).
+ 
+ ## Precio
+ 
+@@ -112,14 +126,11 @@ WapiFood cobra planes de restaurante. Esta tienda cobra pedidos.
+ 
+ | Variable | Dónde se obtiene | Dónde se pone |
+ |----------|------------------|---------------|
+-| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Vercel y `.env.local` |
+-| `SUPABASE_SECRET_KEY` | Supabase → API → secret / service_role. Solo servidor | Vercel (Production y Preview), nunca `NEXT_PUBLIC_` |
+-| `SUPABASE_PUBLISHABLE_KEY` | Supabase → API → publishable / anon | Vercel |
+-| `NEXT_PUBLIC_SUPABASE_URL` | La misma Project URL | Vercel |
+-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | La misma llave publishable | Vercel |
+-| `OL_JWT_SECRET` | Una cadena larga generada por ti | Vercel |
+-| `RESEND_API_KEY` | resend.com → API Keys. Opcional | Vercel |
+-| `MAIL_FROM` | Un remitente verificado en Resend | Vercel |
++| `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Vercel. Es la que ya está |
++| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase → API → publishable / anon | Vercel. Es la que ya está |
++| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → API → service_role. Solo servidor | Vercel. Es la que ya está. Nunca con `NEXT_PUBLIC_` |
++| `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_PUBLISHABLE_KEY` | Alias opcionales de las tres de arriba | No hace falta duplicarlas |
++| `OL_JWT_SECRET`, `RESEND_API_KEY`, `MAIL_FROM` | Ya no se usan | Se pueden borrar de Vercel |
+ | `MERCADO_PAGO_ACCESS_TOKEN` | [Mercado Pago Developers](https://www.mercadopago.com.mx/developers/panel/app) → tu aplicación → **Credenciales de prueba** o **Credenciales de producción** → Access Token. Pruebas: empieza con `TEST-` | Vercel → Settings → Environment Variables |
+ | `MERCADO_PAGO_PUBLIC_KEY` | La misma pantalla de credenciales → Public Key. La app no la usa en el navegador; se guarda para tener el par completo, como en WapiFood | Vercel |
+ | `MERCADO_PAGO_WEBHOOK_SECRET` | Developers → tu aplicación → **Webhooks** → Configurar notificaciones. Al guardar la URL, MP muestra la **clave secreta** de la firma | Vercel. Sin esta clave el webhook responde 401 |
+@@ -135,10 +146,10 @@ No hace falta `NEXT_PUBLIC_SITE_URL`. El origen sale de la petición y, en Verce
+ https://TU-DOMINIO/api/mercadopago/webhook
+ ```
+ 
+-Ejemplo, si el dominio de producción es `orolozano.vercel.app`:
++Ejemplo de producción:
+ 
+ ```
+-https://orolozano.vercel.app/api/mercadopago/webhook
++https://oro-wapitech.vercel.app/api/mercadopago/webhook
+ ```
+ 
+ En el panel: Developers → tu aplicación → Webhooks → **Modo de prueba** o **Modo productivo**, según el token.
+@@ -162,15 +173,25 @@ Mercado Pago tiene que poder hacer POST público a esa URL (HTTPS). `http://loca
+ 
+ `npm run test:pago` cubre la firma, la preferencia (mock) y los cambios de estado sin llaves reales. `MERCADO_PAGO_MOCK=1` arma una preferencia falsa y redirige a `/pago/exito` sin hablar con MP; no lo prendas en Vercel.
+ 
++## Auth en el panel de Supabase
++
++1. Corre `migration_v15_auth.sql` y después, en tu máquina, `npm run auth:migrate` con la service role en `.env.local`.
++2. **Authentication → URL Configuration**
++   - Site URL: `https://oro-wapitech.vercel.app`
++   - Redirect URLs: `https://oro-wapitech.vercel.app/**` y `http://localhost:3000/**`
++3. **Authentication → Emails**: deja la plantilla de "Reset password" y "Confirm signup". El enlace debe usar `{{ .ConfirmationURL }}` (la plantilla por defecto ya lo hace).
++4. El correo incluido de Supabase tiene un límite bajo (unos pocos por hora). Para la tienda real conviene **Authentication → SMTP** con un correo propio (Resend, el del dominio, etc.). Si no, los clientes pueden quedarse sin correo de recuperación cuando haya varios pedidos de enlace.
++5. Si alguna contraseña vieja tiene menos de 6 caracteres (la de demostración `1`), en **Authentication → Providers → Email** baja "Minimum password length" o restablécela con el enlace.
++
+ ## Setup de base
+ 
+-1. SQL, en orden: `schema.sql`, `migration_v7.sql`, `migration_v9.sql`, `migration_v10.sql`, `migration_v14_pago.sql`
++1. SQL, en orden: `schema.sql`, `migration_v7.sql`, `migration_v9.sql`, `migration_v10.sql`, `migration_v14_pago.sql`, `migration_v15_auth.sql`
+ 2. `.env.local` a partir de `.env.example`
+-3. `npm install` → `npm run seed:supabase` → `npm run dev`
++3. `npm install` → `npm run seed:supabase` → `npm run auth:migrate` → `npm run dev`
+ 
+ ## Seguridad
+ 
+-- La secret key de Supabase y el access token de MP solo viven en el servidor.
+-- Contraseñas con bcrypt. OTP hasheado.
++- La service role y el access token de MP solo viven en el servidor. Se leen al atender la petición, no se congelan vacías en el build.
++- La sesión la firma Supabase. El rol admin no se toma de datos que el usuario pueda editar.
+ - El webhook no aplica un pago si la firma no coincide.
+ - El envío sigue en JSONB plano (no cifrado).
+diff --git a/package.json b/package.json
+index 0bd5906..c4dddc7 100644
+--- a/package.json
++++ b/package.json
+@@ -8,7 +8,9 @@
+     "start": "next start",
+     "lint": "eslint",
+     "seed:supabase": "node --env-file=.env.local scripts/seed-supabase.mjs",
+-    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs"
++    "test:pago": "node --test --test-concurrency=1 scripts/test-pago.mjs",
++    "test:auth": "node --test --test-concurrency=1 scripts/test-auth.mjs",
++    "auth:migrate": "node --env-file=.env.local scripts/migrate-auth-users.mjs"
+   },
+   "dependencies": {
+     "@supabase/server": "^1.8.0",
+diff --git a/scripts/migrate-auth-users.mjs b/scripts/migrate-auth-users.mjs
+new file mode 100644
+index 0000000..ab76a7d
+--- /dev/null
++++ b/scripts/migrate-auth-users.mjs
+@@ -0,0 +1,100 @@
++/**
++ * Pasa los usuarios de public.users a Supabase Auth sin cambiar su id
++ * ni los pedidos. Conserva el hash bcrypt.
++ *
++ * Antes: corre supabase/migration_v15_auth.sql en el SQL Editor.
++ *
++ *   npm run auth:migrate
++ */
++import { createClient } from "@supabase/supabase-js";
++import { supabaseSecretKey, supabaseUrl } from "../src/lib/store/env.js";
++
++const url = supabaseUrl();
++const key = supabaseSecretKey();
++if (!url || !key) {
++  console.error("Faltan NEXT_PUBLIC_SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_SECRET_KEY).");
++  process.exit(1);
++}
++
++const sb = createClient(url, key, {
++  auth: { persistSession: false, autoRefreshToken: false },
++});
++
++async function findAuthId(email) {
++  for (let page = 1; page <= 10; page += 1) {
++    const { data, error } = await sb.auth.admin.listUsers({ page, perPage: 200 });
++    if (error) throw new Error(error.message);
++    const found = (data?.users || []).find((user) => user.email?.toLowerCase() === email);
++    if (found) return found.id;
++    if (!data?.users || data.users.length < 200) return null;
++  }
++  return null;
++}
++
++const { data: users, error } = await sb.from("users").select("*");
++if (error) {
++  console.error(error.message);
++  if (/auth_user_id/.test(error.message)) {
++    console.error("Primero corre supabase/migration_v15_auth.sql");
++  }
++  process.exit(1);
++}
++
++let linked = 0;
++let skipped = 0;
++for (const user of users || []) {
++  if (user.auth_user_id) {
++    console.log(`= ${user.username} ya enlazado`);
++    skipped += 1;
++    continue;
++  }
++  if (!user.email) {
++    console.warn(`! ${user.username} no tiene correo. Agrégalo en la tabla users y vuelve a correr este script.`);
++    continue;
++  }
++  const email = String(user.email).trim().toLowerCase();
++  const payload = {
++    email,
++    email_confirm: true,
++    user_metadata: { username: user.username, name: user.name || "" },
++    app_metadata: { role: user.role === "admin" ? "admin" : "customer" },
++  };
++  if (String(user.password || "").startsWith("$2")) {
++    payload.password_hash = user.password;
++  } else {
++    console.warn(`! ${user.username} no tiene hash bcrypt. Entra con "Olvidé mi contraseña".`);
++    continue;
++  }
++
++  let authId = null;
++  const created = await sb.auth.admin.createUser(payload);
++  if (created.error) {
++    if (!/already|registered|exists|duplicate/i.test(created.error.message || "")) {
++      console.error(`x ${user.username}: ${created.error.message}`);
++      continue;
++    }
++    authId = await findAuthId(email);
++  } else {
++    authId = created.data?.user?.id || null;
++  }
++
++  const { data: fresh } = await sb.from("users").select("auth_user_id").eq("id", user.id).maybeSingle();
++  if (fresh?.auth_user_id) {
++    console.log(`+ ${user.username} enlazado por el trigger`);
++    linked += 1;
++    continue;
++  }
++  if (!authId) {
++    console.error(`x ${user.username}: no se obtuvo el id de Auth`);
++    continue;
++  }
++  const { error: updateError } = await sb.from("users").update({ auth_user_id: authId }).eq("id", user.id);
++  if (updateError) {
++    console.error(`x ${user.username}: ${updateError.message}`);
++    continue;
++  }
++  console.log(`+ ${user.username} enlazado`);
++  linked += 1;
++}
++
++console.log(`Listo. Enlazados: ${linked}. Ya estaban: ${skipped}.`);
+diff --git a/scripts/seed-supabase.mjs b/scripts/seed-supabase.mjs
+index a6ce6d5..f936116 100644
+--- a/scripts/seed-supabase.mjs
++++ b/scripts/seed-supabase.mjs
+@@ -165,6 +165,7 @@ try {
+   console.log("\nSeed completo (contraseñas hasheadas con bcrypt).");
+   console.log("Admin: hugo / 1");
+   console.log("Cliente: juan / uwu");
++  console.log("Después corre migration_v15_auth.sql y luego: npm run auth:migrate");
+ } catch (e) {
+   console.error("\nSeed falló:", e.message);
+   console.error("¿Ya corriste supabase/schema.sql en el SQL Editor?");
+diff --git a/scripts/test-auth.mjs b/scripts/test-auth.mjs
+new file mode 100644
+index 0000000..67e08d5
+--- /dev/null
++++ b/scripts/test-auth.mjs
+@@ -0,0 +1,62 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { readServerEnv, supabaseSecretKey, supabaseUrl } from "../src/lib/store/env.js";
++import { resolveRole, safeNextPath } from "../src/lib/store/roles.js";
++import { withErrors } from "../src/lib/store/http.js";
++
++test("la llave de servicio se lee aunque no exista SUPABASE_SECRET_KEY", () => {
++  const previousSecret = process.env.SUPABASE_SECRET_KEY;
++  const previousRole = process.env.SUPABASE_SERVICE_ROLE_KEY;
++  const previousUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
++  delete process.env.SUPABASE_SECRET_KEY;
++  process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-de-prueba";
++  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://ejemplo.supabase.co";
++  try {
++    assert.equal(supabaseSecretKey(), "service-role-de-prueba");
++    assert.equal(supabaseUrl(), "https://ejemplo.supabase.co");
++    assert.equal(readServerEnv("NO_EXISTE"), "");
++  } finally {
++    if (previousSecret === undefined) delete process.env.SUPABASE_SECRET_KEY;
++    else process.env.SUPABASE_SECRET_KEY = previousSecret;
++    if (previousRole === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
++    else process.env.SUPABASE_SERVICE_ROLE_KEY = previousRole;
++    if (previousUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL;
++    else process.env.NEXT_PUBLIC_SUPABASE_URL = previousUrl;
++  }
++});
++
++test("solo app_metadata o el perfil pueden ser admin", () => {
++  assert.equal(resolveRole({ role: "customer" }, { app_metadata: { role: "admin" } }), "admin");
++  assert.equal(resolveRole({ role: "admin" }, { user_metadata: { role: "customer" } }), "admin");
++  assert.equal(resolveRole({ role: "customer" }, { user_metadata: { role: "admin" } }), "customer");
++  assert.equal(resolveRole({ role: "customer" }, {}), "customer");
++});
++
++test("el retorno del correo no puede salir del sitio", () => {
++  assert.equal(safeNextPath("/cuenta/restablecer"), "/cuenta/restablecer");
++  assert.equal(safeNextPath("https://otro.example"), "/cuenta");
++  assert.equal(safeNextPath("//otro.example"), "/cuenta");
++});
++
++test("un fallo de API responde JSON con el mensaje", async () => {
++  const res = {
++    statusCode: 0,
++    body: null,
++    headersSent: false,
++    status(code) {
++      this.statusCode = code;
++      return this;
++    },
++    json(body) {
++      this.body = body;
++    },
++  };
++  const handler = withErrors("prueba", async () => {
++    const error = new Error("Faltan variables de Supabase en el servidor: SUPABASE_SERVICE_ROLE_KEY");
++    error.status = 500;
++    throw error;
++  });
++  await handler({ method: "POST" }, res);
++  assert.equal(res.statusCode, 500);
++  assert.match(res.body.error, /SUPABASE_SERVICE_ROLE_KEY/);
++});
+diff --git a/src/components/AuthProvider.js b/src/components/AuthProvider.js
+index 2790362..2b19df5 100644
+--- a/src/components/AuthProvider.js
++++ b/src/components/AuthProvider.js
+@@ -1,10 +1,5 @@
+ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+-import {
+-  clearSession,
+-  getStoredToken,
+-  getStoredUser,
+-  setSession,
+-} from "@/lib/store/auth-client";
++import { clearSession, setSession } from "@/lib/store/auth-client";
+ import { api } from "@/lib/store/client";
+ import { mergeGuestCart } from "@/lib/store/guest-cart";
+ 
+@@ -23,40 +18,27 @@ export function AuthProvider({ children }) {
+   const [loading, setLoading] = useState(true);
+   const mergedFor = useRef("");
+ 
+-  const hydrate = useCallback(() => {
+-    const t = getStoredToken();
+-    const u = getStoredUser();
+-    setToken(t);
+-    setUser(u);
+-  }, []);
+-
+   const refresh = useCallback(async () => {
+-    hydrate();
+-    const t = getStoredToken();
+-    if (!t) {
+-      setUser(null);
+-      setToken(null);
+-      setLoading(false);
+-      return;
+-    }
+     try {
+       const data = await api.me();
+       if (data.user) {
+         setUser(data.user);
+-        setSession(t, data.user);
++        setToken("session");
++        setSession("session", data.user);
+       } else {
+         clearSession();
+         setUser(null);
+         setToken(null);
+       }
+-    } catch {
++    } catch (error) {
++      console.error("[orolozano] sesion", error?.message || error);
+       clearSession();
+       setUser(null);
+       setToken(null);
+     } finally {
+       setLoading(false);
+     }
+-  }, [hydrate]);
++  }, []);
+ 
+   const logout = useCallback(async () => {
+     await api.logout();
+@@ -71,21 +53,26 @@ export function AuthProvider({ children }) {
+   }, []);
+ 
+   useEffect(() => {
+-    hydrate();
+-    refresh();
+-    const onAuth = () => hydrate();
++    const timer = window.setTimeout(() => {
++      refresh();
++    }, 0);
++    const onAuth = () => {
++      refresh();
++    };
+     window.addEventListener("ol-auth-change", onAuth);
+-    window.addEventListener("storage", onAuth);
+     return () => {
++      window.clearTimeout(timer);
+       window.removeEventListener("ol-auth-change", onAuth);
+-      window.removeEventListener("storage", onAuth);
+     };
+-  }, [hydrate, refresh]);
++  }, [refresh]);
+ 
+   useEffect(() => {
+-    if (loading || !token || !user || user.role === "admin") return;
+-    if (mergedFor.current === token) return;
+-    mergedFor.current = token;
++    if (loading || !user || user.role === "admin") {
++      if (!user) mergedFor.current = "";
++      return;
++    }
++    if (mergedFor.current === user.id) return;
++    mergedFor.current = user.id;
+     mergeGuestCart()
+       .then((result) => {
+         if (result?.dropped) {
+@@ -99,7 +86,7 @@ export function AuthProvider({ children }) {
+       .catch(() => {
+         mergedFor.current = "";
+       });
+-  }, [loading, token, user]);
++  }, [loading, user]);
+ 
+   const value = useMemo(
+     () => ({ user, token, loading, refresh, logout, setAuth }),
+diff --git a/src/lib/store/auth-session.js b/src/lib/store/auth-session.js
+new file mode 100644
+index 0000000..e299a7f
+--- /dev/null
++++ b/src/lib/store/auth-session.js
+@@ -0,0 +1,146 @@
++import { verifyPassword } from "./password.js";
++import { getSiteUrl } from "./mercadopago.js";
++import { resolveRole } from "./roles.js";
++import {
++  findUserByAuthId,
++  findUserByEmail,
++  findUserByUsername,
++  setUserAuthId,
++} from "./services.js";
++import { getAdminClient, createSupabaseRouteClient } from "./supabase.js";
++
++function httpError(message, status) {
++  const error = new Error(message);
++  error.status = status;
++  return error;
++}
++
++function looksLikeEmail(value) {
++  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
++}
++
++async function findAuthIdByEmail(email) {
++  const admin = getAdminClient();
++  const target = email.toLowerCase();
++  for (let page = 1; page <= 10; page += 1) {
++    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 200 });
++    if (error) throw new Error(error.message);
++    const found = (data?.users || []).find((user) => user.email?.toLowerCase() === target);
++    if (found) return found.id;
++    if (!data?.users || data.users.length < 200) break;
++  }
++  return null;
++}
++
++/** Crea el usuario en Supabase Auth conservando el hash bcrypt y lo enlaza al perfil. */
++export async function ensureAuthUser(profile) {
++  if (!profile) return null;
++  if (profile.authUserId) return profile.authUserId;
++  if (!profile.email) {
++    throw httpError("Esta cuenta no tiene correo. Pide al atelier que lo registre.", 400);
++  }
++
++  const admin = getAdminClient();
++  const payload = {
++    email: profile.email,
++    email_confirm: true,
++    user_metadata: { username: profile.username, name: profile.name || "" },
++    app_metadata: { role: profile.role === "admin" ? "admin" : "customer" },
++  };
++  if (String(profile.password || "").startsWith("$2")) {
++    payload.password_hash = profile.password;
++  }
++
++  let authId = null;
++  const created = await admin.auth.admin.createUser(payload);
++  if (created.error) {
++    const message = created.error.message || "";
++    if (!/already|registered|exists|duplicate/i.test(message)) {
++      throw new Error(message);
++    }
++    authId = await findAuthIdByEmail(profile.email);
++  } else {
++    authId = created.data?.user?.id || null;
++  }
++  if (!authId) throw new Error("No se pudo enlazar la cuenta con Supabase Auth");
++  await setUserAuthId(profile.id, authId);
++  return authId;
++}
++
++export async function loginWithPassword(req, res, username, password) {
++  const raw = String(username || "").trim();
++  const secret = String(password || "");
++  if (!raw || !secret) throw httpError("Usuario o contraseña incorrectos", 401);
++
++  let profile = looksLikeEmail(raw) ? await findUserByEmail(raw) : await findUserByUsername(raw);
++  if (!profile && looksLikeEmail(raw)) profile = await findUserByUsername(raw);
++  const email = profile?.email || (looksLikeEmail(raw) ? raw.toLowerCase() : "");
++  if (!email) throw httpError("Usuario o contraseña incorrectos", 401);
++
++  const supabase = createSupabaseRouteClient(req, res);
++  let signed = await supabase.auth.signInWithPassword({ email, password: secret });
++
++  const passwordMatches =
++    profile && (await verifyPassword(secret, profile.password || ""));
++  if (signed.error && profile && passwordMatches) {
++    await ensureAuthUser(profile);
++    signed = await supabase.auth.signInWithPassword({ email, password: secret });
++  }
++  if (signed.error || !signed.data?.user) {
++    const detail = signed.error?.message || "";
++    if (passwordMatches && /at least|too short|password/i.test(detail)) {
++      throw httpError(
++        "La contraseña es correcta, pero Supabase la considera corta. En Authentication baja el mínimo de caracteres o restablécela con el correo.",
++        400,
++      );
++    }
++    throw httpError("Usuario o contraseña incorrectos", 401);
++  }
++
++  if (profile && !profile.authUserId) {
++    profile = await setUserAuthId(profile.id, signed.data.user.id);
++  }
++  let user = await findUserByAuthId(signed.data.user.id);
++  if (!user && profile) user = profile;
++  if (!user) {
++    user = await findUserByEmail(signed.data.user.email || email);
++  }
++  if (!user) throw httpError("No encontramos el perfil de esta cuenta.", 403);
++  user.role = resolveRole(user, signed.data.user);
++  return user;
++}
++
++export async function sendPasswordReset(req, res, email) {
++  const supabase = createSupabaseRouteClient(req, res);
++  const origin = getSiteUrl(req);
++  const { error } = await supabase.auth.resetPasswordForEmail(String(email || "").trim().toLowerCase(), {
++    redirectTo: `${origin}/auth/callback?next=/cuenta/restablecer`,
++  });
++  if (error) throw new Error(error.message);
++}
++
++export async function updatePassword(req, res, newPassword) {
++  if (String(newPassword || "").length < 6) {
++    throw httpError("La contraseña debe tener al menos 6 caracteres", 400);
++  }
++  const supabase = createSupabaseRouteClient(req, res);
++  const { data: auth, error: authError } = await supabase.auth.getUser();
++  if (authError || !auth?.user) throw httpError("El enlace venció. Pide otro correo de recuperación.", 401);
++  const { error } = await supabase.auth.updateUser({ password: String(newPassword) });
++  if (error) throw new Error(error.message);
++}
++
++export async function changePassword(req, res, user, currentPassword, newPassword) {
++  if (String(newPassword || "").length < 6) {
++    throw httpError("La nueva contraseña debe tener al menos 6 caracteres", 400);
++  }
++  if (String(newPassword).length > 64) throw httpError("Máximo 64 caracteres", 400);
++  const supabase = createSupabaseRouteClient(req, res);
++  const signed = await supabase.auth.signInWithPassword({
++    email: user.email,
++    password: currentPassword,
++  });
++  if (signed.error) throw httpError("Contraseña actual incorrecta", 401);
++  const { error } = await supabase.auth.updateUser({ password: String(newPassword) });
++  if (error) throw new Error(error.message);
++}
+diff --git a/src/lib/store/client.js b/src/lib/store/client.js
+index 6b9b63f..105ea8f 100644
+--- a/src/lib/store/client.js
++++ b/src/lib/store/client.js
+@@ -1,13 +1,11 @@
+-import { clearSession, getStoredToken, setSession } from "./auth-client";
++import { clearSession, setSession } from "./auth-client";
+ 
+ async function request(url, init = {}) {
+-  const token = typeof window !== "undefined" ? getStoredToken() : null;
+   const res = await fetch(url, {
+     ...init,
+     credentials: "include",
+     headers: {
+       "Content-Type": "application/json",
+-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+       ...(init.headers ?? {}),
+     },
+   });
+@@ -23,7 +21,7 @@ export const api = {
+       method: "POST",
+       body: JSON.stringify({ username, password }),
+     });
+-    if (data.token && data.user) setSession(data.token, data.user);
++    if (data.user) setSession("session", data.user);
+     return data;
+   },
+   register: async (payload) => {
+@@ -31,7 +29,7 @@ export const api = {
+       method: "POST",
+       body: JSON.stringify(payload),
+     });
+-    if (data.token && data.user) setSession(data.token, data.user);
++    if (data.user) setSession("session", data.user);
+     return data;
+   },
+   forgotPassword: (email) =>
+diff --git a/src/lib/store/env.js b/src/lib/store/env.js
+new file mode 100644
+index 0000000..f1c4718
+--- /dev/null
++++ b/src/lib/store/env.js
+@@ -0,0 +1,40 @@
++/**
++ * Lee variables en el momento de la petición.
++ * Next.js sustituye `process.env.NOMBRE` al construir. Si la variable es
++ * "Sensitive" en Vercel, no existe durante el build y queda vacía para siempre.
++ * `process.env[nombre]` se lee cuando la función corre, ya con las variables reales.
++ */
++export function readServerEnv(...names) {
++  for (const name of names) {
++    const value = process.env[name];
++    if (typeof value === "string" && value.trim()) return value.trim();
++  }
++  return "";
++}
++
++export function supabaseUrl() {
++  return readServerEnv("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL");
++}
++
++export function supabaseSecretKey() {
++  return readServerEnv("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY");
++}
++
++export function supabasePublishableKey() {
++  return readServerEnv(
++    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
++    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
++    "SUPABASE_PUBLISHABLE_KEY",
++  );
++}
++
++export function missingSupabaseMessage() {
++  const missing = [];
++  if (!supabaseUrl()) missing.push("NEXT_PUBLIC_SUPABASE_URL");
++  if (!supabaseSecretKey()) missing.push("SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_SECRET_KEY)");
++  if (!supabasePublishableKey()) {
++    missing.push("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY");
++  }
++  if (!missing.length) return "";
++  return `Faltan variables de Supabase en el servidor: ${missing.join(", ")}. En Vercel deben estar disponibles al ejecutar la función.`;
++}
+diff --git a/src/lib/store/http.js b/src/lib/store/http.js
+index 4a7c886..f977c3c 100644
+--- a/src/lib/store/http.js
++++ b/src/lib/store/http.js
+@@ -1,65 +1,40 @@
+-import { findUserById, getSession } from "./services";
+-import { verifyJwt } from "./jwt";
++import { findUserByAuthId, findUserByEmail, setUserAuthId } from "./services.js";
++import { createSupabaseRouteClient } from "./supabase.js";
++import { resolveRole } from "./roles.js";
+ 
+-export const SESSION_COOKIE = "ol_session";
+-
+-function parseCookies(header = "") {
+-  return Object.fromEntries(
+-    header
+-      .split(";")
+-      .map((p) => p.trim())
+-      .filter(Boolean)
+-      .map((p) => {
+-        const i = p.indexOf("=");
+-        if (i === -1) return [p, ""];
+-        return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))];
+-      }),
+-  );
++export function json(res, data, status = 200) {
++  res.status(status).json(data);
+ }
+ 
+-export function getSessionId(req) {
+-  const cookies = parseCookies(req.headers.cookie || "");
+-  return cookies[SESSION_COOKIE] || null;
++/** Envuelve una API para que un fallo quede en el log y en un JSON claro, no en "Internal Server Error". */
++export function withErrors(route, handler) {
++  return async function wrapped(req, res) {
++    try {
++      return await handler(req, res);
++    } catch (error) {
++      const status = Number(error?.status) || 500;
++      const message = error?.message || "Error del servidor";
++      console.error(`[orolozano] ${route} ${req?.method || ""} ${status}: ${message}`);
++      if (error?.details) console.error(`[orolozano] ${route} detalle:`, error.details);
++      if (res.headersSent) return;
++      return json(res, { error: message }, status >= 400 && status < 600 ? status : 500);
++    }
++  };
+ }
+ 
+-export function getBearerToken(req) {
+-  const auth = req.headers.authorization || "";
+-  if (auth.startsWith("Bearer ")) return auth.slice(7);
+-  return null;
+-}
++export async function currentUserFromRequest(req, res) {
++  const supabase = createSupabaseRouteClient(req, res);
++  const { data, error } = await supabase.auth.getUser();
++  if (error || !data?.user) return null;
+ 
+-export async function currentUserFromRequest(req) {
+-  const token = getBearerToken(req);
+-  if (token) {
+-    const payload = verifyJwt(token);
+-    if (payload?.sub) {
+-      const user = await findUserById(payload.sub);
+-      if (user) return user;
++  let profile = await findUserByAuthId(data.user.id);
++  if (!profile && data.user.email) {
++    const byEmail = await findUserByEmail(data.user.email);
++    if (byEmail && !byEmail.authUserId) {
++      profile = await setUserAuthId(byEmail.id, data.user.id);
+     }
+   }
+-  const id = getSessionId(req);
+-  if (!id) return null;
+-  const session = await getSession(id);
+-  if (!session) return null;
+-  const user = await findUserById(session.userId);
+-  return user ?? null;
+-}
+-
+-export function json(res, data, status = 200) {
+-  res.status(status).json(data);
+-}
+-
+-export function setSessionCookie(res, sessionId) {
+-  const maxAge = 60 * 60 * 24 * 14;
+-  res.setHeader(
+-    "Set-Cookie",
+-    `${SESSION_COOKIE}=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
+-  );
+-}
+-
+-export function clearSessionCookie(res) {
+-  res.setHeader(
+-    "Set-Cookie",
+-    `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+-  );
++  if (!profile) return null;
++  profile.role = resolveRole(profile, data.user);
++  return profile;
+ }
+diff --git a/src/lib/store/jwt.js b/src/lib/store/jwt.js
+deleted file mode 100644
+index c5a3aca..0000000
+--- a/src/lib/store/jwt.js
++++ /dev/null
+@@ -1,57 +0,0 @@
+-import crypto from "node:crypto";
+-
+-const SECRET = process.env.OL_JWT_SECRET || "orolozano-dev-secret-change-me-32chars";
+-
+-function b64url(input) {
+-  return Buffer.from(input)
+-    .toString("base64")
+-    .replace(/=/g, "")
+-    .replace(/\+/g, "-")
+-    .replace(/\//g, "_");
+-}
+-
+-function b64urlJson(obj) {
+-  return b64url(JSON.stringify(obj));
+-}
+-
+-export function signJwt(payload, expiresInSec = 60 * 60 * 24 * 14) {
+-  const header = { alg: "HS256", typ: "JWT" };
+-  const body = {
+-    ...payload,
+-    iat: Math.floor(Date.now() / 1000),
+-    exp: Math.floor(Date.now() / 1000) + expiresInSec,
+-  };
+-  const h = b64urlJson(header);
+-  const p = b64urlJson(body);
+-  const sig = crypto
+-    .createHmac("sha256", SECRET)
+-    .update(`${h}.${p}`)
+-    .digest("base64")
+-    .replace(/=/g, "")
+-    .replace(/\+/g, "-")
+-    .replace(/\//g, "_");
+-  return `${h}.${p}.${sig}`;
+-}
+-
+-export function verifyJwt(token) {
+-  if (!token || typeof token !== "string") return null;
+-  const parts = token.split(".");
+-  if (parts.length !== 3) return null;
+-  const [h, p, s] = parts;
+-  const expected = crypto
+-    .createHmac("sha256", SECRET)
+-    .update(`${h}.${p}`)
+-    .digest("base64")
+-    .replace(/=/g, "")
+-    .replace(/\+/g, "-")
+-    .replace(/\//g, "_");
+-  if (s !== expected) return null;
+-  try {
+-    const json = Buffer.from(p.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+-    const payload = JSON.parse(json);
+-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+-    return payload;
+-  } catch {
+-    return null;
+-  }
+-}
+diff --git a/src/lib/store/mail.js b/src/lib/store/mail.js
+index 89ab36c..3592d9b 100644
+--- a/src/lib/store/mail.js
++++ b/src/lib/store/mail.js
+@@ -1,4 +1,5 @@
+ /**
++ * Ya no lo usa el sitio (v15): la recuperación la manda Supabase Auth.
+  * Envío de correo para OTP de recuperación.
+  * Prioridad:
+  *  1. RESEND_API_KEY + MAIL_FROM  → Resend
+diff --git a/src/lib/store/roles.js b/src/lib/store/roles.js
+new file mode 100644
+index 0000000..3ffa062
+--- /dev/null
++++ b/src/lib/store/roles.js
+@@ -0,0 +1,12 @@
++/** El rol de administrador sale de la base o de app_metadata. Nunca de user_metadata. */
++export function resolveRole(profile, authUser) {
++  const appRole = authUser?.app_metadata?.role;
++  if (appRole === "admin" || profile?.role === "admin") return "admin";
++  return "customer";
++}
++
++export function safeNextPath(value, fallback = "/cuenta") {
++  const next = typeof value === "string" ? value : "";
++  if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\")) return fallback;
++  return next;
++}
+diff --git a/src/lib/store/services.js b/src/lib/store/services.js
+index f368ab3..6395558 100644
+--- a/src/lib/store/services.js
++++ b/src/lib/store/services.js
+@@ -1,7 +1,6 @@
+ import crypto from "node:crypto";
+ import { getAdminClient, publicImageUrl } from "./supabase.js";
+-import { hashPassword, verifyPassword, generateOtp } from "./password.js";
+-import { sendPasswordOtpEmail } from "./mail.js";
++import { hashPassword, verifyPassword } from "./password.js";
+ import { assertStatusTransition } from "./order-status.js";
+ import { normalizeSpotMap } from "./mx-validate.js";
+ import { reservationIsStale } from "./payment-decision.js";
+@@ -35,6 +34,7 @@ function mapUser(row) {
+     phone: row.phone || "",
+     role: row.role || "customer",
+     shipping: row.shipping || {},
++    authUserId: row.auth_user_id || null,
+     createdAt: row.created_at,
+   };
+ }
+@@ -131,12 +131,42 @@ export async function findUserById(id) {
+   return mapUser(data);
+ }
+ 
++function dbError(error) {
++  const message = error?.message || "Error de base de datos";
++  if (/auth_user_id/.test(message)) {
++    return new Error("Falta correr supabase/migration_v15_auth.sql en el SQL Editor de Supabase.");
++  }
++  return new Error(message);
++}
++
++export async function findUserByAuthId(authUserId) {
++  if (!authUserId) return null;
++  const { data, error } = await sb()
++    .from("users")
++    .select("*")
++    .eq("auth_user_id", authUserId)
++    .maybeSingle();
++  if (error) throw dbError(error);
++  return mapUser(data);
++}
++
++export async function setUserAuthId(userId, authUserId) {
++  const { data, error } = await sb()
++    .from("users")
++    .update({ auth_user_id: authUserId })
++    .eq("id", userId)
++    .select("*")
++    .single();
++  if (error) throw dbError(error);
++  return mapUser(data);
++}
++
+ export async function createUser(input) {
+   const existing = await findUserByUsername(input.username);
+   if (existing) throw new Error("El usuario ya existe");
+-  const hashed = await hashPassword(input.password);
++  const hashed = input.password ? await hashPassword(input.password) : null;
+   const user = {
+-    id: uid("usr"),
++    id: input.id || uid("usr"),
+     username: input.username.trim().toLowerCase(),
+     password: hashed,
+     name: (input.name || "").trim(),
+@@ -169,11 +199,12 @@ export async function createUser(input) {
+       phone: user.phone,
+       role: user.role,
+       shipping: user.shipping,
++      auth_user_id: input.authUserId || null,
+       created_at: user.created_at,
+     })
+     .select("*")
+     .single();
+-  if (error) throw new Error(error.message);
++  if (error) throw dbError(error);
+   return mapUser(data);
+ }
+ 
+@@ -542,83 +573,6 @@ export async function findUserByEmail(email) {
+   return mapUser(data);
+ }
+ 
+-export async function requestPasswordReset(email) {
+-  const user = await findUserByEmail(email);
+-  // Respuesta genérica siempre (no revelar si el correo existe)
+-  if (!user) {
+-    return { ok: true };
+-  }
+-  const otp = generateOtp(6);
+-  const otpHash = await hashPassword(otp);
+-  const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+-  // Invalidar OTPs previos no usados
+-  await sb()
+-    .from("password_resets")
+-    .update({ used_at: new Date().toISOString() })
+-    .eq("email", user.email)
+-    .is("used_at", null);
+-
+-  const { error } = await sb().from("password_resets").insert({
+-    id: uid("rst"),
+-    user_id: user.id,
+-    email: user.email,
+-    otp_hash: otpHash,
+-    expires_at: expires,
+-    created_at: new Date().toISOString(),
+-  });
+-  if (error) throw new Error(error.message);
+-
+-  await sendPasswordOtpEmail({ to: user.email, name: user.name, otp });
+-  return { ok: true };
+-}
+-
+-export async function resetPasswordWithOtp({ email, otp, newPassword }) {
+-  if (!email || !otp || !newPassword) {
+-    throw new Error("Correo, OTP y nueva contraseña son requeridos");
+-  }
+-  if (String(newPassword).length < 6) {
+-    throw new Error("La contraseña debe tener al menos 6 caracteres");
+-  }
+-  const normalized = String(email).trim().toLowerCase();
+-  const { data: rows, error } = await sb()
+-    .from("password_resets")
+-    .select("*")
+-    .eq("email", normalized)
+-    .is("used_at", null)
+-    .order("created_at", { ascending: false })
+-    .limit(5);
+-  if (error) throw new Error(error.message);
+-  if (!rows || rows.length === 0) {
+-    throw new Error("Código inválido o expirado");
+-  }
+-  const now = Date.now();
+-  let matched = null;
+-  for (const row of rows) {
+-    if (new Date(row.expires_at).getTime() < now) continue;
+-    const ok = await verifyPassword(otp, row.otp_hash);
+-    if (ok) {
+-      matched = row;
+-      break;
+-    }
+-  }
+-  if (!matched) throw new Error("Código inválido o expirado");
+-
+-  const hashed = await hashPassword(newPassword);
+-  const { error: upErr } = await sb()
+-    .from("users")
+-    .update({ password: hashed })
+-    .eq("id", matched.user_id);
+-  if (upErr) throw new Error(upErr.message);
+-
+-  await sb()
+-    .from("password_resets")
+-    .update({ used_at: new Date().toISOString() })
+-    .eq("id", matched.id);
+-
+-  return { ok: true };
+-}
+-
+-
+ /* ---------- admin_data (settings / categories / spot) ---------- */
+ 
+ const DEFAULT_ADMIN_DATA = {
+diff --git a/src/lib/store/supabase.js b/src/lib/store/supabase.js
+index 248f279..ffcac0d 100644
+--- a/src/lib/store/supabase.js
++++ b/src/lib/store/supabase.js
+@@ -1,42 +1,77 @@
+ import { createClient } from "@supabase/supabase-js";
++import { createServerClient } from "@supabase/ssr";
++import { serialize } from "cookie";
++import { missingSupabaseMessage, supabasePublishableKey, supabaseSecretKey, supabaseUrl } from "./env.js";
+ 
+-const url =
+-  process.env.SUPABASE_URL ||
+-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+-  "";
+-
+-const secretKey =
+-  process.env.SUPABASE_SECRET_KEY ||
+-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+-  "";
+-
+-const publishableKey =
+-  process.env.SUPABASE_PUBLISHABLE_KEY ||
+-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+-  "";
++function parseCookies(header = "") {
++  return Object.fromEntries(
++    header
++      .split(";")
++      .map((part) => part.trim())
++      .filter(Boolean)
++      .map((part) => {
++        const index = part.indexOf("=");
++        if (index === -1) return [part, ""];
++        const name = part.slice(0, index);
++        const raw = part.slice(index + 1);
++        try {
++          return [name, decodeURIComponent(raw)];
++        } catch {
++          return [name, raw];
++        }
++      }),
++  );
++}
+ 
+-if (!url) {
+-  console.warn("[orolozano] SUPABASE_URL is not set");
++function requireUrlAndKey(key, label) {
++  const url = supabaseUrl();
++  if (!url || !key) {
++    const error = new Error(missingSupabaseMessage() || `Falta configurar Supabase (${label})`);
++    error.status = 500;
++    throw error;
++  }
++  return url;
+ }
+ 
+-/** Server-side admin client — bypasses RLS. Never import in browser code. */
++/** Cliente admin. Ignora RLS. Solo en el servidor. */
+ export function getAdminClient() {
+-  if (!url || !secretKey) {
+-    throw new Error("Faltan SUPABASE_URL o SUPABASE_SECRET_KEY en el servidor");
+-  }
+-  return createClient(url, secretKey, {
++  const key = supabaseSecretKey();
++  const url = requireUrlAndKey(key, "llave de servicio");
++  return createClient(url, key, {
+     auth: { persistSession: false, autoRefreshToken: false },
+   });
+ }
+ 
+-/** Browser/safe client (publishable). Optional for future client queries. */
+-export function getPublicClient() {
+-  if (!url || !publishableKey) {
+-    throw new Error("Faltan NEXT_PUBLIC_SUPABASE_URL o PUBLISHABLE_KEY");
+-  }
+-  return createClient(url, publishableKey, {
+-    auth: { persistSession: false, autoRefreshToken: false },
++/**
++ * Cliente de sesión para API routes (Pages Router).
++ * Lee y escribe las cookies de Supabase Auth en esta petición.
++ */
++export function createSupabaseRouteClient(req, res) {
++  const key = supabasePublishableKey();
++  const url = requireUrlAndKey(key, "llave publicable");
++  return createServerClient(url, key, {
++    cookies: {
++      getAll() {
++        const parsed = parseCookies(req.headers?.cookie || "");
++        return Object.entries(parsed).map(([name, value]) => ({ name, value }));
++      },
++      setAll(cookiesToSet, headers) {
++        const previous = res.getHeader?.("Set-Cookie");
++        const list = previous
++          ? (Array.isArray(previous) ? previous.map(String) : [String(previous)])
++          : [];
++        for (const { name, value, options } of cookiesToSet || []) {
++          list.push(serialize(name, value, options || {}));
++        }
++        if (list.length) res.setHeader("Set-Cookie", list);
++        if (headers) {
++          for (const [header, value] of Object.entries(headers)) {
++            if (header.toLowerCase() === "set-cookie") continue;
++            res.setHeader(header, value);
++          }
++        }
++      },
++    },
+   });
+ }
+ 
+@@ -45,5 +80,7 @@ export function publicImageUrl(path) {
+   if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("/")) {
+     return path;
+   }
++  const url = supabaseUrl();
++  if (!url) return path;
+   return `${url}/storage/v1/object/public/products/${path.replace(/^\/+/, "")}`;
+ }
+diff --git a/src/pages/api/admin/orders.js b/src/pages/api/admin/orders.js
+index 658012d..da18844 100644
+--- a/src/pages/api/admin/orders.js
++++ b/src/pages/api/admin/orders.js
+@@ -1,11 +1,13 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { listOrders } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+   const orders = await listOrders();
+   // Never delete — always return full history
+   return json(res, { orders });
+ }
++
++export default withErrors("api/admin/orders", handler);
+diff --git a/src/pages/api/admin/orders/[id].js b/src/pages/api/admin/orders/[id].js
+index 3bdc38f..3f11ebf 100644
+--- a/src/pages/api/admin/orders/[id].js
++++ b/src/pages/api/admin/orders/[id].js
+@@ -1,4 +1,4 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import {
+   updateOrderStatus,
+   releaseProductIfHeldBy,
+@@ -9,8 +9,8 @@ import { ORDER_STATUSES, canAdvanceFulfillment } from "@/lib/store/order-status"
+ 
+ const ALLOWED = new Set(ORDER_STATUSES.map((s) => s.id));
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+   const { id } = req.query;
+ 
+@@ -74,3 +74,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/admin/orders/[id]", handler);
+diff --git a/src/pages/api/admin/products/[id].js b/src/pages/api/admin/products/[id].js
+index 4f7fbb4..6b2cd2a 100644
+--- a/src/pages/api/admin/products/[id].js
++++ b/src/pages/api/admin/products/[id].js
+@@ -1,8 +1,8 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { getProduct, softDeleteProduct, updateProduct } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+   const { id } = req.query;
+ 
+@@ -34,3 +34,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/admin/products/[id]", handler);
+diff --git a/src/pages/api/admin/products/index.js b/src/pages/api/admin/products/index.js
+index e45dd0d..37dd3e1 100644
+--- a/src/pages/api/admin/products/index.js
++++ b/src/pages/api/admin/products/index.js
+@@ -1,8 +1,8 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { createProduct, listProducts } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+ 
+   if (req.method === "GET") {
+@@ -36,3 +36,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/admin/products/index", handler);
+diff --git a/src/pages/api/admin/settings.js b/src/pages/api/admin/settings.js
+index cb3df81..f584ba5 100644
+--- a/src/pages/api/admin/settings.js
++++ b/src/pages/api/admin/settings.js
+@@ -1,8 +1,8 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { getAdminData, updateAdminData } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+ 
+   if (req.method === "GET") {
+@@ -31,3 +31,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/admin/settings", handler);
+diff --git a/src/pages/api/admin/upload.js b/src/pages/api/admin/upload.js
+index 6fa3656..d4a8ce3 100644
+--- a/src/pages/api/admin/upload.js
++++ b/src/pages/api/admin/upload.js
+@@ -1,4 +1,4 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { uploadProductImage } from "@/lib/store/services";
+ 
+ export const config = {
+@@ -9,9 +9,9 @@ export const config = {
+   },
+ };
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user || user.role !== "admin") return json(res, { error: "No autorizado" }, 403);
+ 
+   const { filename, contentType, dataBase64 } = req.body || {};
+@@ -30,3 +30,5 @@ export default async function handler(req, res) {
+     return json(res, { error: err.message || "Error al subir" }, 500);
+   }
+ }
++
++export default withErrors("api/admin/upload", handler);
+diff --git a/src/pages/api/auth/change-password.js b/src/pages/api/auth/change-password.js
+index ce7a8c3..ef15684 100644
+--- a/src/pages/api/auth/change-password.js
++++ b/src/pages/api/auth/change-password.js
+@@ -1,28 +1,12 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
+-import { findUserById, updateUser, verifyPassword } from "@/lib/store/services";
++import { changePassword } from "@/lib/store/auth-session";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ 
+-/** Usuario logueado cambia contraseña (sin OTP de recuperación) */
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+-
+-  const currentPassword = req.body?.currentPassword || "";
+-  const newPassword = req.body?.newPassword || "";
+-  if (!currentPassword || !newPassword) {
+-    return json(res, { error: "Indica contraseña actual y nueva" }, 400);
+-  }
+-  if (String(newPassword).length < 6) {
+-    return json(res, { error: "La nueva contraseña debe tener al menos 6 caracteres" }, 400);
+-  }
+-  if (String(newPassword).length > 64) {
+-    return json(res, { error: "Máximo 64 caracteres" }, 400);
+-  }
+-
+-  const full = await findUserById(user.id);
+-  const ok = await verifyPassword(currentPassword, full.password);
+-  if (!ok) return json(res, { error: "Contraseña actual incorrecta" }, 401);
+-
+-  await updateUser(user.id, { password: newPassword });
++  await changePassword(req, res, user, req.body?.currentPassword || "", req.body?.newPassword || "");
+   return json(res, { ok: true, message: "Contraseña actualizada" });
+ }
++
++export default withErrors("auth/change-password", handler);
+diff --git a/src/pages/api/auth/forgot-password.js b/src/pages/api/auth/forgot-password.js
+index ca78bf8..5d448b5 100644
+--- a/src/pages/api/auth/forgot-password.js
++++ b/src/pages/api/auth/forgot-password.js
+@@ -1,19 +1,18 @@
+-import { json } from "@/lib/store/http";
+-import { requestPasswordReset } from "@/lib/store/services";
++import { sendPasswordReset } from "@/lib/store/auth-session";
++import { json, withErrors } from "@/lib/store/http";
++import { validateEmail } from "@/lib/store/mx-validate";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const email = (req.body?.email || "").trim().toLowerCase();
++  const email = String(req.body?.email || "").trim().toLowerCase();
+   if (!email) return json(res, { error: "Indica tu correo" }, 400);
+-  try {
+-    await requestPasswordReset(email);
+-    // Siempre la misma respuesta (no filtrar existencia del correo)
+-    return json(res, {
+-      ok: true,
+-      message: "Si el correo está registrado, enviamos un código OTP. Revisa tu bandeja (o la consola del servidor en modo pruebas).",
+-    });
+-  } catch (err) {
+-    console.error("[forgot-password]", err);
+-    return json(res, { error: err.message || "No se pudo procesar" }, 500);
+-  }
++  const emailError = validateEmail(email);
++  if (emailError) return json(res, { error: emailError }, 400);
++  await sendPasswordReset(req, res, email);
++  return json(res, {
++    ok: true,
++    message: "Si el correo está registrado, te enviamos un enlace para restablecer la contraseña.",
++  });
+ }
++
++export default withErrors("auth/forgot-password", handler);
+diff --git a/src/pages/api/auth/login.js b/src/pages/api/auth/login.js
+index 036ea47..3ed52e7 100644
+--- a/src/pages/api/auth/login.js
++++ b/src/pages/api/auth/login.js
+@@ -1,27 +1,11 @@
+-import { createSession, findUserByUsername, toPublic, verifyPassword } from "@/lib/store/services";
+-import { json, setSessionCookie } from "@/lib/store/http";
+-import { signJwt } from "@/lib/store/jwt";
++import { loginWithPassword } from "@/lib/store/auth-session";
++import { json, withErrors } from "@/lib/store/http";
++import { toPublic } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const username = (req.body?.username || "").trim();
+-  const password = req.body?.password || "";
+-  const user = await findUserByUsername(username);
+-  if (!user) {
+-    return json(res, { error: "Usuario o contraseña incorrectos" }, 401);
+-  }
+-  const valid = await verifyPassword(password, user.password);
+-  if (!valid) {
+-    return json(res, { error: "Usuario o contraseña incorrectos" }, 401);
+-  }
+-  const session = await createSession(user.id);
+-  setSessionCookie(res, session.id);
+-  const publicUser = toPublic(user);
+-  const token = signJwt({
+-    sub: user.id,
+-    username: user.username,
+-    role: user.role,
+-    name: user.name,
+-  });
+-  return json(res, { user: publicUser, token });
++  const user = await loginWithPassword(req, res, req.body?.username, req.body?.password);
++  return json(res, { user: toPublic(user), token: "session" });
+ }
++
++export default withErrors("auth/login", handler);
+diff --git a/src/pages/api/auth/logout.js b/src/pages/api/auth/logout.js
+index a6cc562..f27619f 100644
+--- a/src/pages/api/auth/logout.js
++++ b/src/pages/api/auth/logout.js
+@@ -1,10 +1,12 @@
+-import { deleteSession } from "@/lib/store/services";
+-import { clearSessionCookie, getSessionId, json } from "@/lib/store/http";
++import { json, withErrors } from "@/lib/store/http";
++import { createSupabaseRouteClient } from "@/lib/store/supabase";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const id = getSessionId(req);
+-  if (id) await deleteSession(id);
+-  clearSessionCookie(res);
++  const supabase = createSupabaseRouteClient(req, res);
++  const { error } = await supabase.auth.signOut();
++  if (error) return json(res, { error: error.message }, 400);
+   return json(res, { ok: true });
+ }
++
++export default withErrors("auth/logout", handler);
+diff --git a/src/pages/api/auth/me.js b/src/pages/api/auth/me.js
+index a04951e..7fc5e53 100644
+--- a/src/pages/api/auth/me.js
++++ b/src/pages/api/auth/me.js
+@@ -1,8 +1,10 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { toPublic } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   return json(res, { user: user ? toPublic(user) : null });
+ }
++
++export default withErrors("auth/me", handler);
+diff --git a/src/pages/api/auth/profile.js b/src/pages/api/auth/profile.js
+index 01b3f2f..ecd38fc 100644
+--- a/src/pages/api/auth/profile.js
++++ b/src/pages/api/auth/profile.js
+@@ -1,18 +1,26 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { toPublic, updateUser } from "@/lib/store/services";
++import { createSupabaseRouteClient } from "@/lib/store/supabase";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "PUT") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+   const body = req.body || {};
+   const patch = {};
+   if (body.name) patch.name = String(body.name).trim();
+   if (body.email) patch.email = String(body.email).trim().toLowerCase();
+   if (body.phone !== undefined) patch.phone = String(body.phone).trim();
+-  if (body.shipping && typeof body.shipping === "object") {
+-    patch.shipping = body.shipping;
++  if (body.shipping && typeof body.shipping === "object") patch.shipping = body.shipping;
++
++  if (patch.email && patch.email !== user.email) {
++    const supabase = createSupabaseRouteClient(req, res);
++    const { error } = await supabase.auth.updateUser({ email: patch.email });
++    if (error) return json(res, { error: error.message }, 400);
+   }
++
+   const updated = await updateUser(user.id, patch);
+   return json(res, { user: toPublic(updated) });
+ }
++
++export default withErrors("auth/profile", handler);
+diff --git a/src/pages/api/auth/register.js b/src/pages/api/auth/register.js
+index f782ad7..2f6ccfa 100644
+--- a/src/pages/api/auth/register.js
++++ b/src/pages/api/auth/register.js
+@@ -1,32 +1,70 @@
+-import { createSession, createUser, toPublic } from "@/lib/store/services";
+-import { json, setSessionCookie } from "@/lib/store/http";
+-import { signJwt } from "@/lib/store/jwt";
++import { json, withErrors } from "@/lib/store/http";
++import { getSiteUrl } from "@/lib/store/mercadopago";
++import { createUser, findUserByAuthId, findUserByEmail, findUserByUsername, setUserAuthId, toPublic } from "@/lib/store/services";
++import { createSupabaseRouteClient } from "@/lib/store/supabase";
++import { validateEmail } from "@/lib/store/mx-validate";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const { username, password, name, email } = req.body || {};
++  const username = String(req.body?.username || "").trim().toLowerCase();
++  const password = String(req.body?.password || "");
++  const name = String(req.body?.name || "").trim();
++  const email = String(req.body?.email || "").trim().toLowerCase();
+   if (!username || !password || !name || !email) {
+     return json(res, { error: "Completa todos los campos" }, 400);
+   }
+-  try {
+-    const user = await createUser({
++  const emailError = validateEmail(email);
++  if (emailError) return json(res, { error: emailError }, 400);
++  if (password.length < 6) {
++    return json(res, { error: "La contraseña debe tener al menos 6 caracteres" }, 400);
++  }
++  if (await findUserByUsername(username)) {
++    return json(res, { error: "El usuario ya existe" }, 400);
++  }
++  if (await findUserByEmail(email)) {
++    return json(res, { error: "Ese correo ya tiene cuenta" }, 400);
++  }
++
++  const supabase = createSupabaseRouteClient(req, res);
++  const origin = getSiteUrl(req);
++  const { data, error } = await supabase.auth.signUp({
++    email,
++    password,
++    options: {
++      data: { username, name },
++      emailRedirectTo: `${origin}/auth/callback?next=/cuenta`,
++    },
++  });
++  if (error) {
++    const message = /already registered|already exists|already been registered/i.test(error.message)
++      ? "Ese correo ya tiene cuenta"
++      : error.message;
++    return json(res, { error: message }, 400);
++  }
++  if (!data?.user) return json(res, { error: "No se pudo crear la cuenta" }, 400);
++
++  let profile = await findUserByAuthId(data.user.id);
++  if (!profile) {
++    profile = await createUser({
++      id: data.user.id,
++      authUserId: data.user.id,
+       username,
+-      password,
+       name,
+       email,
+       role: "customer",
+     });
+-    const session = await createSession(user.id);
+-    setSessionCookie(res, session.id);
+-    const publicUser = toPublic(user);
+-    const token = signJwt({
+-      sub: user.id,
+-      username: user.username,
+-      role: user.role,
+-      name: user.name,
+-    });
+-    return json(res, { user: publicUser, token }, 201);
+-  } catch (err) {
+-    return json(res, { error: err.message || "No se pudo registrar" }, 400);
++  } else if (!profile.authUserId) {
++    profile = await setUserAuthId(profile.id, data.user.id);
+   }
++
++  if (!data.session) {
++    return json(res, {
++      user: null,
++      needsConfirmation: true,
++      message: "Te enviamos un correo para confirmar la cuenta. Ábrelo y luego entra.",
++    }, 201);
++  }
++  return json(res, { user: toPublic(profile), token: "session" }, 201);
+ }
++
++export default withErrors("auth/register", handler);
+diff --git a/src/pages/api/auth/reset-password.js b/src/pages/api/auth/reset-password.js
+index e391d6b..2fd58f6 100644
+--- a/src/pages/api/auth/reset-password.js
++++ b/src/pages/api/auth/reset-password.js
+@@ -1,15 +1,11 @@
+-import { json } from "@/lib/store/http";
+-import { resetPasswordWithOtp } from "@/lib/store/services";
++import { updatePassword } from "@/lib/store/auth-session";
++import { json, withErrors } from "@/lib/store/http";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const email = (req.body?.email || "").trim().toLowerCase();
+-  const otp = String(req.body?.otp || "").trim();
+   const newPassword = req.body?.newPassword || req.body?.password || "";
+-  try {
+-    await resetPasswordWithOtp({ email, otp, newPassword });
+-    return json(res, { ok: true, message: "Contraseña actualizada. Ya puedes entrar." });
+-  } catch (err) {
+-    return json(res, { error: err.message || "No se pudo restablecer" }, 400);
+-  }
++  await updatePassword(req, res, newPassword);
++  return json(res, { ok: true, message: "Contraseña actualizada. Ya puedes entrar." });
+ }
++
++export default withErrors("auth/reset-password", handler);
+diff --git a/src/pages/api/cart.js b/src/pages/api/cart.js
+index cd5f178..9c19dd7 100644
+--- a/src/pages/api/cart.js
++++ b/src/pages/api/cart.js
+@@ -1,12 +1,12 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { getCart, getProduct, getProductsByIds, setCart } from "@/lib/store/services";
+ 
+ function unavailable(product) {
+   return !product || product.stock < 1 || product.sold || !product.active || product.reservedOrderId;
+ }
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+ 
+   if (req.method === "GET") {
+@@ -66,3 +66,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/cart", handler);
+diff --git a/src/pages/api/certificates/[uuid].js b/src/pages/api/certificates/[uuid].js
+index 53752f3..768572c 100644
+--- a/src/pages/api/certificates/[uuid].js
++++ b/src/pages/api/certificates/[uuid].js
+@@ -1,7 +1,7 @@
+-import { json } from "@/lib/store/http";
++import { json, withErrors } from "@/lib/store/http";
+ import { getProductByCertificateUuid } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+   const product = await getProductByCertificateUuid(req.query.uuid);
+   if (!product || !product.active) return json(res, { error: "Certificado no encontrado" }, 404);
+@@ -19,3 +19,5 @@ export default async function handler(req, res) {
+     },
+   });
+ }
++
++export default withErrors("api/certificates/[uuid]", handler);
+diff --git a/src/pages/api/mercadopago/checkout.js b/src/pages/api/mercadopago/checkout.js
+index 549fe7a..efc41af 100644
+--- a/src/pages/api/mercadopago/checkout.js
++++ b/src/pages/api/mercadopago/checkout.js
+@@ -1,11 +1,11 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { getOrder } from "@/lib/store/services";
+ import { reopenOrderPreference } from "@/lib/store/payments";
+ 
+ /** Nueva preferencia para un pedido propio que sigue pendiente de pago. */
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+   if (user.role === "admin") return json(res, { error: "Usa una cuenta de cliente" }, 403);
+ 
+@@ -27,3 +27,5 @@ export default async function handler(req, res) {
+     return json(res, { error: error.message || "Error Mercado Pago" }, error.status || 500);
+   }
+ }
++
++export default withErrors("api/mercadopago/checkout", handler);
+diff --git a/src/pages/api/mercadopago/sync.js b/src/pages/api/mercadopago/sync.js
+index 18333b0..1419510 100644
+--- a/src/pages/api/mercadopago/sync.js
++++ b/src/pages/api/mercadopago/sync.js
+@@ -1,4 +1,4 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { mpFetch } from "@/lib/store/mercadopago";
+ import { applyMercadoPagoPayment } from "@/lib/store/payments";
+ import { readOrderIdFromPayment } from "@/lib/store/payment-decision";
+@@ -8,9 +8,9 @@ import { getOrder } from "@/lib/store/services";
+  * La página de retorno consulta el pago en Mercado Pago.
+  * El webhook sigue siendo la fuente de verdad; esto solo adelanta el mismo efecto.
+  */
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "POST") return json(res, { error: "Método no permitido" }, 405);
+-  const user = await currentUserFromRequest(req);
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+ 
+   const paymentId = req.body?.paymentId || req.body?.collectionId;
+@@ -31,3 +31,5 @@ export default async function handler(req, res) {
+     return json(res, { error: error.message || "No se pudo consultar el pago" }, error.status || 500);
+   }
+ }
++
++export default withErrors("api/mercadopago/sync", handler);
+diff --git a/src/pages/api/orders.js b/src/pages/api/orders.js
+index effbe02..c3cae0d 100644
+--- a/src/pages/api/orders.js
++++ b/src/pages/api/orders.js
+@@ -1,10 +1,10 @@
+-import { currentUserFromRequest, json } from "@/lib/store/http";
++import { currentUserFromRequest, json, withErrors } from "@/lib/store/http";
+ import { sanitizeShipping, validateShippingMx } from "@/lib/store/mx-validate";
+ import { placeOrderAndPreference } from "@/lib/store/payments";
+ import { listOrders, updateOrderShipping } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
+-  const user = await currentUserFromRequest(req);
++async function handler(req, res) {
++  const user = await currentUserFromRequest(req, res);
+   if (!user) return json(res, { error: "Inicia sesión" }, 401);
+ 
+   if (req.method === "GET") {
+@@ -57,3 +57,5 @@ export default async function handler(req, res) {
+ 
+   return json(res, { error: "Método no permitido" }, 405);
+ }
++
++export default withErrors("api/orders", handler);
+diff --git a/src/pages/api/products/[id].js b/src/pages/api/products/[id].js
+index 390b327..40ff234 100644
+--- a/src/pages/api/products/[id].js
++++ b/src/pages/api/products/[id].js
+@@ -1,7 +1,7 @@
+-import { json } from "@/lib/store/http";
++import { json, withErrors } from "@/lib/store/http";
+ import { getProduct } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+   const product = await getProduct(req.query.id);
+   if (!product || !product.active || product.sold || product.reservedOrderId) {
+@@ -9,3 +9,5 @@ export default async function handler(req, res) {
+   }
+   return json(res, { product });
+ }
++
++export default withErrors("api/products/[id]", handler);
+diff --git a/src/pages/api/products/index.js b/src/pages/api/products/index.js
+index 71d164a..adb9053 100644
+--- a/src/pages/api/products/index.js
++++ b/src/pages/api/products/index.js
+@@ -1,8 +1,10 @@
+-import { json } from "@/lib/store/http";
++import { json, withErrors } from "@/lib/store/http";
+ import { listProducts } from "@/lib/store/services";
+ 
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+   const products = await listProducts();
+   return json(res, { products });
+ }
++
++export default withErrors("api/products/index", handler);
+diff --git a/src/pages/api/settings.js b/src/pages/api/settings.js
+index 657ad3f..7f4839c 100644
+--- a/src/pages/api/settings.js
++++ b/src/pages/api/settings.js
+@@ -1,8 +1,8 @@
+-import { json } from "@/lib/store/http";
++import { json, withErrors } from "@/lib/store/http";
+ import { getAdminData } from "@/lib/store/services";
+ 
+ /** Público: categorías activas para filtros de tienda */
+-export default async function handler(req, res) {
++async function handler(req, res) {
+   if (req.method !== "GET") return json(res, { error: "Método no permitido" }, 405);
+   try {
+     const settings = await getAdminData();
+@@ -20,3 +20,5 @@ export default async function handler(req, res) {
+     });
+   }
+ }
++
++export default withErrors("api/settings", handler);
+diff --git a/src/pages/auth/callback.js b/src/pages/auth/callback.js
+new file mode 100644
+index 0000000..0dc55de
+--- /dev/null
++++ b/src/pages/auth/callback.js
+@@ -0,0 +1,51 @@
++import Head from "next/head";
++import Link from "next/link";
++import { PageShell } from "@/components/SiteChrome";
++
++export default function AuthCallback({ error }) {
++  return (
++    <>
++      <Head>
++        <title>Confirmando cuenta — Oro Lozano</title>
++      </Head>
++      <PageShell>
++        <section className="mx-auto max-w-md px-5 py-20 text-center">
++          <p className="text-xs tracking-[0.28em] uppercase text-gold">Cuenta</p>
++          <h1 className="mt-3 text-4xl">{error ? "No se pudo confirmar" : "Listo"}</h1>
++          <p className="mt-4 text-muted">
++            {error || "Tu enlace ya se usó. Puedes entrar a tu cuenta."}
++          </p>
++          <Link href="/cuenta" className="mt-8 inline-flex h-12 items-center rounded-full bg-gold px-8 text-xs tracking-[0.18em] uppercase text-bg">
++            Ir a mi cuenta
++          </Link>
++        </section>
++      </PageShell>
++    </>
++  );
++}
++
++export async function getServerSideProps({ req, res, query }) {
++  const { safeNextPath } = await import("@/lib/store/roles");
++  const { createSupabaseRouteClient } = await import("@/lib/store/supabase");
++  const next = safeNextPath(query.next, "/cuenta");
++  try {
++    const supabase = createSupabaseRouteClient(req, res);
++    if (query.code) {
++      const { error } = await supabase.auth.exchangeCodeForSession(String(query.code));
++      if (error) return { props: { error: error.message } };
++      return { redirect: { destination: next, permanent: false } };
++    }
++    if (query.token_hash && query.type) {
++      const { error } = await supabase.auth.verifyOtp({
++        token_hash: String(query.token_hash),
++        type: String(query.type),
++      });
++      if (error) return { props: { error: error.message } };
++      return { redirect: { destination: next, permanent: false } };
++    }
++    return { props: { error: "El enlace no trae un código válido. Pide otro correo." } };
++  } catch (error) {
++    console.error("[orolozano] auth/callback", error.message);
++    return { props: { error: error.message || "No se pudo confirmar el enlace" } };
++  }
++}
+diff --git a/src/pages/cuenta/index.js b/src/pages/cuenta/index.js
+index a0ff613..a2aa541 100644
+--- a/src/pages/cuenta/index.js
++++ b/src/pages/cuenta/index.js
+@@ -42,8 +42,6 @@ export default function Cuenta() {
+   const [profile, setProfile] = useState({ name: "", email: "", phone: "" });
+   const [shipping, setShipping] = useState(emptyShipping);
+   const [saved, setSaved] = useState("");
+-  const [otp, setOtp] = useState("");
+-  const [newPassword, setNewPassword] = useState("");
+   const [recoverEmail, setRecoverEmail] = useState("");
+   const [toast, setToast] = useState("");
+   const [toastType, setToastType] = useState("success");
+@@ -368,7 +366,7 @@ export default function Cuenta() {
+             <p className="mt-3 text-center text-sm text-muted">
+               {mode === "login" || mode === "register"
+                 ? "Cliente: juan / uwu · Admin: hugo / 1"
+-                : "Te enviaremos un código OTP al correo registrado"}
++                : "Te enviamos un enlace al correo para elegir una contraseña nueva"}
+             </p>
+ 
+             {(mode === "login" || mode === "register") && (
+@@ -380,10 +378,15 @@ export default function Cuenta() {
+                   try {
+                     if (mode === "login") {
+                       const data = await api.login(username, password);
+-                      setAuth(data.token, data.user);
++                      setAuth(data.token || "session", data.user);
+                     } else {
+                       const data = await api.register({ username, password, name, email });
+-                      setAuth(data.token, data.user);
++                      if (data.needsConfirmation) {
++                        setSaved(data.message);
++                        setMode("login");
++                        return;
++                      }
++                      setAuth(data.token || "session", data.user);
+                     }
+                     await refresh();
+                   } catch (err) {
+@@ -400,6 +403,7 @@ export default function Cuenta() {
+                 <Field label="Usuario" value={username} onChange={setUsername} />
+                 <Field label="Contraseña" value={password} onChange={setPassword} type="password" />
+                 {error ? <p className="text-sm text-danger">{error}</p> : null}
++                {saved ? <p className="text-sm text-gold">{saved}</p> : null}
+                 <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
+                   {mode === "login" ? "Entrar" : "Registrarme"}
+                 </button>
+@@ -415,8 +419,7 @@ export default function Cuenta() {
+                   setSaved("");
+                   try {
+                     const res = await api.forgotPassword(recoverEmail);
+-                    setSaved(res.message || "Revisa tu correo");
+-                    setMode("reset");
++                    setSaved(res.message || "Revisa tu correo y abre el enlace");
+                   } catch (err) {
+                     setError(err.message);
+                   }
+@@ -426,43 +429,21 @@ export default function Cuenta() {
+                 {error ? <p className="text-sm text-danger">{error}</p> : null}
+                 {saved ? <p className="text-sm text-gold">{saved}</p> : null}
+                 <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
+-                  Enviar código OTP
++                  Enviar enlace
+                 </button>
++                <Link href="/cuenta/restablecer" className="block text-center text-sm text-gold">
++                  Ya abrí el enlace del correo
++                </Link>
+               </form>
+             )}
+ 
+             {mode === "reset" && (
+-              <form
+-                className="mt-8 space-y-3"
+-                onSubmit={async (e) => {
+-                  e.preventDefault();
+-                  setError("");
+-                  setSaved("");
+-                  try {
+-                    const res = await api.resetPassword({
+-                      email: recoverEmail,
+-                      otp,
+-                      newPassword,
+-                    });
+-                    setSaved(res.message || "Contraseña actualizada");
+-                    setMode("login");
+-                    setPassword("");
+-                    setOtp("");
+-                    setNewPassword("");
+-                  } catch (err) {
+-                    setError(err.message);
+-                  }
+-                }}
+-              >
+-                <Field label="Correo" value={recoverEmail} onChange={setRecoverEmail} />
+-                <Field label="Código OTP (6 dígitos)" value={otp} onChange={setOtp} />
+-                <Field label="Nueva contraseña" value={newPassword} onChange={setNewPassword} type="password" />
+-                {error ? <p className="text-sm text-danger">{error}</p> : null}
+-                {saved ? <p className="text-sm text-gold">{saved}</p> : null}
+-                <button type="submit" className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg">
+-                  Guardar nueva contraseña
+-                </button>
+-              </form>
++              <div className="mt-8 space-y-3 text-sm text-muted">
++                <p>Abre el enlace que llegó a tu correo. Ahí podrás escribir la contraseña nueva.</p>
++                <Link href="/cuenta/restablecer" className="inline-block text-gold">
++                  Ya abrí el enlace
++                </Link>
++              </div>
+             )}
+ 
+             <div className="mt-6 space-y-2 text-center text-sm text-muted">
+diff --git a/src/pages/cuenta/restablecer.js b/src/pages/cuenta/restablecer.js
+new file mode 100644
+index 0000000..d39be37
+--- /dev/null
++++ b/src/pages/cuenta/restablecer.js
+@@ -0,0 +1,84 @@
++import Head from "next/head";
++import Link from "next/link";
++import { useState } from "react";
++import { PageShell } from "@/components/SiteChrome";
++import { api } from "@/lib/store/client";
++
++export default function Restablecer() {
++  const [password, setPassword] = useState("");
++  const [confirm, setConfirm] = useState("");
++  const [message, setMessage] = useState("");
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  return (
++    <>
++      <Head>
++        <title>Nueva contraseña — Oro Lozano</title>
++      </Head>
++      <PageShell>
++        <section className="mx-auto max-w-md px-5 py-16">
++          <p className="text-xs tracking-[0.28em] uppercase text-gold">Cuenta</p>
++          <h1 className="mt-2 text-4xl">Nueva contraseña</h1>
++          <p className="mt-3 text-sm text-muted">
++            Abre esta página desde el enlace del correo. Si el enlace venció, pide otro desde Entrar.
++          </p>
++          <form
++            className="mt-8 space-y-3"
++            onSubmit={async (event) => {
++              event.preventDefault();
++              setError("");
++              setMessage("");
++              if (password !== confirm) {
++                setError("Las contraseñas no coinciden");
++                return;
++              }
++              setBusy(true);
++              try {
++                const result = await api.resetPassword({ newPassword: password });
++                setMessage(result.message || "Contraseña actualizada");
++                setPassword("");
++                setConfirm("");
++              } catch (err) {
++                setError(err.message);
++              } finally {
++                setBusy(false);
++              }
++            }}
++          >
++            <label className="block">
++              <span className="mb-1 block text-xs tracking-[0.16em] uppercase text-subtle">Nueva contraseña</span>
++              <input
++                type="password"
++                value={password}
++                onChange={(event) => setPassword(event.target.value)}
++                className="h-12 w-full rounded-[var(--radius-md)] border border-border bg-bg px-4"
++              />
++            </label>
++            <label className="block">
++              <span className="mb-1 block text-xs tracking-[0.16em] uppercase text-subtle">Confirmar</span>
++              <input
++                type="password"
++                value={confirm}
++                onChange={(event) => setConfirm(event.target.value)}
++                className="h-12 w-full rounded-[var(--radius-md)] border border-border bg-bg px-4"
++              />
++            </label>
++            {error ? <p className="text-sm text-danger">{error}</p> : null}
++            {message ? <p className="text-sm text-gold">{message}</p> : null}
++            <button
++              type="submit"
++              disabled={busy}
++              className="h-12 w-full rounded-full bg-gold text-xs tracking-[0.2em] uppercase text-bg disabled:opacity-50"
++            >
++              {busy ? "Guardando…" : "Guardar contraseña"}
++            </button>
++          </form>
++          <Link href="/cuenta" className="mt-6 inline-block text-sm text-gold">
++            Volver a entrar
++          </Link>
++        </section>
++      </PageShell>
++    </>
++  );
++}
+diff --git a/src/proxy.js b/src/proxy.js
+new file mode 100644
+index 0000000..bb3147e
+--- /dev/null
++++ b/src/proxy.js
+@@ -0,0 +1,39 @@
++import { createServerClient } from "@supabase/ssr";
++import { NextResponse } from "next/server";
++import { supabasePublishableKey, supabaseUrl } from "@/lib/store/env";
++
++export async function proxy(request) {
++  const url = supabaseUrl();
++  const key = supabasePublishableKey();
++  if (!url || !key) return NextResponse.next();
++
++  let response = NextResponse.next({ request });
++  try {
++    const supabase = createServerClient(url, key, {
++      cookies: {
++        getAll() {
++          return request.cookies.getAll();
++        },
++        setAll(cookiesToSet, headers) {
++          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
++          response = NextResponse.next({ request });
++          cookiesToSet.forEach(({ name, value, options }) => {
++            response.cookies.set(name, value, options);
++          });
++          Object.entries(headers || {}).forEach(([header, value]) => {
++            response.headers.set(header, value);
++          });
++        },
++      },
++    });
++    await supabase.auth.getUser();
++  } catch (error) {
++    console.error("[orolozano] proxy auth", error?.message || error);
++    return NextResponse.next();
++  }
++  return response;
++}
++
++export const config = {
++  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)"],
++};
+diff --git a/supabase/README.md b/supabase/README.md
+index af859cd..7744bcb 100644
+--- a/supabase/README.md
++++ b/supabase/README.md
+@@ -57,3 +57,15 @@ Agrega en `orders`: `payment_status`, `mp_preference_id`, `mp_payment_id`, `mp_s
+ Agrega en `products`: `reserved_order_id`, `reserved_at` (la pieza única se aparta al abrir el checkout).
+ 
+ Los pedidos que ya existían quedan como `payment_status = pagado` (o `cancelado` si el pedido estaba cancelado) para que el atelier pueda seguir despachándolos.
++
++## Migration v15 — Supabase Auth
++
++Después de la v14, en el SQL Editor: `migration_v15_auth.sql`.
++
++Luego, en la carpeta del proyecto (con la service role en `.env.local`):
++
++```powershell
++npm run auth:migrate
++```
++
++Eso crea las cuentas en Supabase Auth con la misma contraseña (el hash bcrypt) y las enlaza sin cambiar pedidos ni carritos.
+diff --git a/supabase/migration_v15_auth.sql b/supabase/migration_v15_auth.sql
+new file mode 100644
+index 0000000..b3422b2
+--- /dev/null
++++ b/supabase/migration_v15_auth.sql
+@@ -0,0 +1,159 @@
++-- Oro Lozano v15 — Supabase Auth
++-- Ejecutar en el SQL Editor DESPUÉS de migration_v14_pago.sql.
++-- No borra usuarios, pedidos ni carritos. El id de public.users se conserva.
++
++alter table public.users add column if not exists auth_user_id uuid;
++alter table public.users alter column password drop not null;
++
++create unique index if not exists users_auth_user_id_uidx
++  on public.users (auth_user_id)
++  where auth_user_id is not null;
++
++do $$
++begin
++  if not exists (
++    select 1 from pg_constraint
++    where conname = 'users_auth_user_id_fkey'
++      and conrelid = 'public.users'::regclass
++  ) then
++    alter table public.users
++      add constraint users_auth_user_id_fkey
++      foreign key (auth_user_id) references auth.users (id) on delete set null;
++  end if;
++end $$;
++
++-- Al crear la cuenta en Auth, enlaza el perfil que ya existe (mismo correo)
++-- o crea uno nuevo. Los pedidos siguen apuntando al id de siempre.
++create or replace function public.handle_new_auth_user()
++returns trigger
++language plpgsql
++security definer
++set search_path = public
++as $$
++declare
++  linked_id text;
++  next_username text;
++begin
++  update public.users
++  set auth_user_id = new.id
++  where id = (
++    select id
++    from public.users
++    where auth_user_id is null
++      and lower(email) = lower(coalesce(new.email, ''))
++    order by created_at
++    limit 1
++  )
++  returning id into linked_id;
++
++  if linked_id is not null then
++    if new.raw_app_meta_data->>'role' = 'admin' then
++      update public.users set role = 'admin' where id = linked_id;
++    end if;
++    return new;
++  end if;
++
++  next_username := coalesce(
++    nullif(new.raw_user_meta_data->>'username', ''),
++    split_part(coalesce(new.email, 'cliente'), '@', 1)
++  );
++  if exists (select 1 from public.users where lower(username) = lower(next_username)) then
++    next_username := next_username || '-' || substr(new.id::text, 1, 4);
++  end if;
++
++  insert into public.users (id, auth_user_id, username, email, name, role, password, shipping)
++  values (
++    new.id::text,
++    new.id,
++    next_username,
++    coalesce(new.email, ''),
++    coalesce(new.raw_user_meta_data->>'name', ''),
++    case when new.raw_app_meta_data->>'role' = 'admin' then 'admin' else 'customer' end,
++    null,
++    jsonb_build_object('fullName', coalesce(new.raw_user_meta_data->>'name', ''))
++  );
++  return new;
++end;
++$$;
++
++revoke all on function public.handle_new_auth_user() from public, anon, authenticated;
++
++drop trigger if exists on_auth_user_created on auth.users;
++create trigger on_auth_user_created
++  after insert on auth.users
++  for each row execute function public.handle_new_auth_user();
++
++-- Un cliente no puede cambiarse el rol ni desvincular su cuenta.
++create or replace function public.protect_user_privileged_columns()
++returns trigger
++language plpgsql
++as $$
++begin
++  if coalesce(auth.role(), '') = 'authenticated' then
++    new.role := old.role;
++    new.auth_user_id := old.auth_user_id;
++    new.password := old.password;
++    new.email := old.email;
++    new.id := old.id;
++    new.username := old.username;
++  end if;
++  return new;
++end;
++$$;
++
++drop trigger if exists protect_user_privileged_columns on public.users;
++create trigger protect_user_privileged_columns
++  before update on public.users
++  for each row execute function public.protect_user_privileged_columns();
++
++grant select on public.users to authenticated;
++grant select on public.orders to authenticated;
++grant select, insert, update, delete on public.carts to authenticated;
++
++drop policy if exists "Usuario lee su perfil" on public.users;
++create policy "Usuario lee su perfil"
++  on public.users for select
++  to authenticated
++  using (auth_user_id = (select auth.uid()));
++
++drop policy if exists "Usuario actualiza su perfil" on public.users;
++create policy "Usuario actualiza su perfil"
++  on public.users for update
++  to authenticated
++  using (auth_user_id = (select auth.uid()))
++  with check (auth_user_id = (select auth.uid()));
++
++drop policy if exists "Cliente lee sus pedidos" on public.orders;
++create policy "Cliente lee sus pedidos"
++  on public.orders for select
++  to authenticated
++  using (
++    user_id in (
++      select id from public.users where auth_user_id = (select auth.uid())
++    )
++  );
++
++drop policy if exists "Cliente lee su carrito" on public.carts;
++create policy "Cliente lee su carrito"
++  on public.carts for select
++  to authenticated
++  using (
++    user_id in (
++      select id from public.users where auth_user_id = (select auth.uid())
++    )
++  );
++
++drop policy if exists "Cliente escribe su carrito" on public.carts;
++create policy "Cliente escribe su carrito"
++  on public.carts for all
++  to authenticated
++  using (
++    user_id in (
++      select id from public.users where auth_user_id = (select auth.uid())
++    )
++  )
++  with check (
++    user_id in (
++      select id from public.users where auth_user_id = (select auth.uid())
++    )
++  );
